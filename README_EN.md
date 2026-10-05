@@ -1,4 +1,4 @@
-# ImageThumbToDetailViewer (图片批量筛选器)
+# ImageThumbToDetailViewer (选片助手工作台)
 
 A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin. Supports RAW.
 
@@ -18,6 +18,8 @@ Built with **PySide6**.
 - **Click** anywhere on a tile: check / uncheck.
 - **Shift + click**: range selection (file-manager style).
 - **Match by file name**: type file names or fragments, separated by English / Chinese commas. An exact file-name match takes priority, then substring matching; each entry matches at most one file. The matches become the current selection, and manual selections are also written back to the input box.
+- **Select All**: check every image in the current folder in one click (`Ctrl + A`).
+- **Deselect All**: clear the selection (`Esc`).
 
 ### Batch operations
 - **Copy to New Filter Folder / Move to New Filter Folder (复制到新筛选文件夹 / 移动到新筛选文件夹)**:
@@ -25,6 +27,9 @@ Built with **PySide6**.
 - **Copy to Folder / Move to Folder (复制到指定文件夹 / 移动到指定文件夹)**: 
   choose any destination folder. Uses the native system copy / move; on a name conflict it pops up the system's own conflict dialog (replace / skip / keep both). If the native call is unavailable, it falls back to a built-in conflict dialog (replace / replace all / skip / skip all).
 - **Move to Recycle Bin (移动到回收站)**: shows a confirmation dialog first, then sends the files to the recycle bin.
+
+### Export
+- **Stitch Selected Thumbnails**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Exports as PNG / JPEG (`Ctrl + S`).
 
 ### Quality of life
 - After a successful copy, the selection and the input box are cleared automatically.
@@ -56,6 +61,9 @@ Built with **PySide6**.
 | Ctrl + wheel | Zoom in / out |
 | Click a tile | Check / uncheck |
 | Shift + click | Range select |
+| Ctrl + A | Select all |
+| Esc | Deselect all |
+| Ctrl + S | Stitch selected thumbnails |
 | Ctrl + C | Copy to folder |
 | Ctrl + X | Move to folder |
 | Del / Backspace | Move to recycle bin (when the image view has focus) |

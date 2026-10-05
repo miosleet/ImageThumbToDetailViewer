@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ImageThumbToDetailViewer（图片批量筛选器 v3）
+选片助手工作台（ImageThumbToDetailViewer v3）
 
 依赖：
     pip install PySide6 Pillow rawpy
@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -786,7 +787,7 @@ class MainWindow(QMainWindow):
 
         super().__init__()
 
-        self.setWindowTitle("图片批量筛选器")
+        self.setWindowTitle("选片助手工作台")
         self.resize(1400, 900)
 
         self.folder = None
@@ -805,6 +806,7 @@ class MainWindow(QMainWindow):
         # 工具栏
         # ----------------------------------------------------
 
+        # 第一行：打开 / 路径 / 文件名 / 匹配 / 全选 / 全不选
         top = QHBoxLayout()
 
         self.open_btn = QPushButton("打开文件夹")
@@ -825,12 +827,9 @@ class MainWindow(QMainWindow):
         top.addWidget(self.name_edit, 2)
 
         for text, slot in (
-            ("匹配文件名", self.match_names),
-            ("复制到新筛选文件夹", self.copy_to_new_folder),
-            ("复制到指定文件夹", self.copy_to_folder),
-            ("移动到新筛选文件夹", self.move_to_new_folder),
-            ("移动到指定文件夹", self.move_to_folder),
-            ("移动到回收站", self.move_to_recycle_bin),
+            ("匹配文件名 (Enter)", self.match_names),
+            ("全选 (Ctrl+A)", self.select_all),
+            ("全不选 (Esc)", self.deselect_all),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
@@ -838,10 +837,26 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(top)
 
+        # 第二行：复制 / 移动 / 回收站 / 拼接导出
+        second = QHBoxLayout()
+
+        for text, slot in (
+            ("复制到新筛选文件夹", self.copy_to_new_folder),
+            ("复制到指定文件夹 (Ctrl+C)", self.copy_to_folder),
+            ("移动到新筛选文件夹", self.move_to_new_folder),
+            ("移动到指定文件夹 (Ctrl+X)", self.move_to_folder),
+            ("移动到回收站 (Del / Backspace)", self.move_to_recycle_bin),
+            ("批量拼接缩略图 (Ctrl+S)", self.stitch_selected),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(slot)
+            second.addWidget(button)
+
+        layout.addLayout(second)
+
         layout.addWidget(QLabel(
             "Ctrl + 滚轮：缩放；普通滚轮：滚动；横向滚轮：左右移动；"
             "Shift + 点击：范围选择；点击图片任意位置：勾选/取消；"
-            "Ctrl+C：复制到指定文件夹；Ctrl+X：移动到指定文件夹；Del / Backspace：移动到回收站"
         ))
 
         # ----------------------------------------------------
@@ -856,6 +871,8 @@ class MainWindow(QMainWindow):
 
         # ----------------------------------------------------
         # 快捷键
+        # Ctrl+A / Esc：全选 / 全不选
+        # Ctrl+S：批量拼接缩略图
         # Ctrl+C / Ctrl+X：复制 / 移动到指定文件夹
         # Del / Backspace：移动到回收站（仅图片视图聚焦时）
         # ----------------------------------------------------
@@ -863,6 +880,9 @@ class MainWindow(QMainWindow):
         self._shortcuts = []
 
         for keys, slot, widget in (
+            ("Ctrl+A", self.select_all, self),
+            ("Esc", self.deselect_all, self),
+            ("Ctrl+S", self.stitch_selected, self),
             ("Ctrl+C", self.copy_to_folder, self),
             ("Ctrl+X", self.move_to_folder, self),
             ("Del", self.move_to_recycle_bin, self.view),
@@ -1088,6 +1108,163 @@ class MainWindow(QMainWindow):
 
         names = [Path(self.view.paths[i]).name for i in sorted(self.view.checked)]
         self.name_edit.setText(",".join(names))
+
+    def select_all(self):
+        """勾选当前文件夹中的所有图片。"""
+
+        if not self.view.paths:
+            return
+
+        self.view.checked = set(range(len(self.view.paths)))
+        self.view.last_clicked_index = len(self.view.paths) - 1
+        self.view.viewport().update()
+        self.sync_checked_to_edit()
+
+    def deselect_all(self):
+        """取消所有勾选。"""
+
+        self.view.checked.clear()
+        self.view.last_clicked_index = None
+        self.view.viewport().update()
+        self.sync_checked_to_edit()
+
+    # --------------------------------------------------------
+    # 批量拼接缩略图
+    # --------------------------------------------------------
+
+    def stitch_selected(self):
+        """
+        把选中的图片按当前缩放档位的列数拼接成一张总宽 3840 的大图：
+        每格为一张缩略图并带文件名，高度随行数自然增长。
+        放大显示时列数为 1，即每行只有一张。
+        """
+
+        indices = self.selected_indices()
+
+        if not indices:
+            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
+            return
+
+        # 当前档位的一行列数（放大显示时为 1）
+        columns = self.view.columns()
+
+        rows = (len(indices) + columns - 1) // columns
+        cell = 3840 / columns
+        width = 3840
+        height = int(round(rows * cell))
+
+        # 防止拼接图过大导致内存问题
+        if width * height > 150_000_000:
+            QMessageBox.warning(
+                self,
+                "提示",
+                f"拼接图尺寸过大（{width} × {height}）。\n"
+                "请减少选中数量，或先缩小到列数更多的档位再导出。",
+            )
+            return
+
+        canvas = QImage(width, height, QImage.Format.Format_RGB32)
+        canvas.fill(QColor(25, 25, 25))
+
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        font = painter.font()
+        font.setPixelSize(min(48, max(12, int(cell * 0.045))))
+        painter.setFont(font)
+
+        failed = 0
+
+        for position, index in enumerate(indices):
+
+            row, column = divmod(position, columns)
+            left = int(round(column * cell))
+            right = int(round((column + 1) * cell))
+            top = int(round(row * cell))
+            bottom = int(round((row + 1) * cell))
+            rect = QRect(left, top, right - left, bottom - top)
+
+            # 优先复用已加载的预览图，缺失时按需读取
+            image = self.view.images.get(index)
+
+            if image is None:
+                try:
+                    image = load_image(self.view.paths[index])
+                except Exception as e:
+                    failed += 1
+                    print(f"[拼接] 读取失败 {self.view.paths[index]}: {e}", flush=True)
+                    image = None
+
+            if image is not None and not image.isNull():
+
+                scaled = image.scaled(
+                    rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawImage(
+                    QPoint(
+                        rect.left() + (rect.width() - scaled.width()) // 2,
+                        rect.top() + (rect.height() - scaled.height()) // 2,
+                    ),
+                    scaled,
+                )
+
+            # 文件名（底部半透明条）
+            bar_height = max(18, int(cell * 0.06))
+            bar = QRect(
+                rect.left(),
+                rect.bottom() - bar_height + 1,
+                rect.width(),
+                bar_height,
+            )
+            painter.fillRect(bar, QColor(0, 0, 0, 150))
+            painter.setPen(QColor(255, 255, 255))
+
+            name = Path(self.view.paths[index]).name
+            text = painter.fontMetrics().elidedText(
+                name, Qt.TextElideMode.ElideRight, bar.width() - 12
+            )
+            painter.drawText(
+                bar.adjusted(6, 0, -6, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                text,
+            )
+
+        painter.end()
+
+        # 默认文件名：<当前文件夹名>_缩略图_<时间戳>
+        if self.folder is not None:
+            base = self.folder
+            prefix = base.name
+        else:
+            base = Path.home()
+            prefix = "拼接"
+
+        default = base / f"{prefix}_缩略图_{datetime.now():%Y%m%d_%H%M%S}.png"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "保存拼接缩略图",
+            str(default),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg)",
+        )
+
+        if not path:
+            return
+
+        if not canvas.save(path):
+            QMessageBox.warning(self, "提示", "保存图片失败。")
+            return
+
+        message = f"已导出 {len(indices)} 张缩略图（{columns} 列）到：\n{path}"
+        if failed:
+            message += f"\n\n其中 {failed} 张读取失败。"
+
+        QMessageBox.information(self, "拼接完成", message)
+        self.statusBar().showMessage(
+            f"拼接完成：{len(indices)} 张 -> {Path(path).name}"
+        )
 
     # --------------------------------------------------------
     # 文件搬运
@@ -1378,7 +1555,7 @@ class MainWindow(QMainWindow):
 def main():
 
     app = QApplication(sys.argv)
-    app.setApplicationName("图片批量筛选器")
+    app.setApplicationName("选片助手工作台")
 
     window = MainWindow()
     window.show()
