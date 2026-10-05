@@ -21,7 +21,7 @@ Built with **PySide6**.
 - **Select All (Ctrl + A)**: check every image in the current folder in one click.
 - **Deselect All (Esc)**: clear the selection.
 
-### Batch operations
+### Copy/Move/Delete
 - **Copy to New Filter Folder / Move to New Filter Folder**: create `筛选_XX` next to the current folder, using the smallest unused number. After a move, the thumbnail grid is refreshed.
 - **Copy to Folder (Ctrl + C) / Move to Folder (Ctrl + X)**: copy or move the selected images to any destination folder. Uses the native system copy / move; on a name conflict it pops up the system's own conflict dialog (replace / skip / keep both). If the native call is unavailable, it falls back to a built-in conflict dialog (replace / replace all / skip / skip all).
 - **Move to Recycle Bin (Del/Backspace)**: shows a confirmation dialog first, then sends the files to the recycle bin. After that, the thumbnail grid is refreshed.
