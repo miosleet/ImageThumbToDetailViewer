@@ -101,3 +101,28 @@ python raw_photo_browser_3.py
 
 ### Prebuilt single-file exe
 Double-click `dist/RAWPhotoBrowser3.exe`. It is built in windowed mode and **shows no console window**.
+
+---
+
+## License
+
+This project is licensed under **CC BY-NC-SA 4.0**
+(Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International).
+
+- **Attribution**: when you use, redistribute, or adapt it, give appropriate credit, provide the
+  source, and indicate whether changes were made.
+- **NonCommercial**: you may not use it for commercial purposes.
+- **ShareAlike**: any modification or derivative work must be released under the same license.
+
+See [LICENSE](LICENSE) for the full text, or visit
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode .
+
+---
+
+## Author
+
+**MioSleet**
+
+- GitHub: https://github.com/miosleet
+- Bilibili: https://space.bilibili.com/12788388
+- Douyin: MioSleet (澪霰就是零线)

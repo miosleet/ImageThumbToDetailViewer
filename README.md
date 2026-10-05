@@ -92,3 +92,25 @@ python raw_photo_browser_3.py
 
 ### 已打包的单文件 exe
 直接双击 `dist/RAWPhotoBrowser3.exe`。采用窗口模式打包，**不会出现控制台黑框**。
+
+---
+
+## 许可证
+
+本项目采用 **CC BY-NC-SA 4.0**（署名—非商业性使用—相同方式共享 4.0 国际）许可协议。
+
+- **署名**：使用、转载或改编时，请注明作者与来源，并说明是否做出修改。
+- **非商业**：不得用于商业目的。
+- **相同方式共享**：基于本项目的修改或衍生作品，需以相同协议发布。
+
+完整协议见 [LICENSE](LICENSE)，或访问 https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode 。
+
+---
+
+## 作者
+
+**MioSleet**
+
+- GitHub：https://github.com/miosleet
+- Bilibili：https://space.bilibili.com/12788388
+- 抖音：MioSleet（澪霰就是零线）
