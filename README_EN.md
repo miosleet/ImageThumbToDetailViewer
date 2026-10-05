@@ -1,4 +1,4 @@
-# Image Batch Filter (图片批量筛选器)
+# ImageThumbToDetailViewer (图片批量筛选器)
 
 A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin. Supports RAW.
 
@@ -83,11 +83,11 @@ Built with **PySide6**.
 ### From source
 ```bash
 pip install PySide6 Pillow rawpy
-python raw_photo_browser_3.py
+python ImageThumbToDetailViewer_v3.py
 ```
 
 ### Prebuilt single-file exe
-Double-click `dist/RAWPhotoBrowser3.exe`. It is built in windowed mode and **shows no console window**.
+Double-click `dist/ImageThumbToDetailViewer.exe`. It is built in windowed mode and **shows no console window**.
 
 ---
 

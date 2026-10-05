@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-图片批量筛选器（v3）
+ImageThumbToDetailViewer（图片批量筛选器 v3）
 
 依赖：
     pip install PySide6 Pillow rawpy
@@ -15,7 +15,7 @@
     3FR/ERF/KDC/MRW/RAW/RWL/X3F/IIQ/MOS/MEF/ARI
 
 运行：
-    python raw_photo_browser_3.py
+    python ImageThumbToDetailViewer_v3.py
 """
 
 import ctypes

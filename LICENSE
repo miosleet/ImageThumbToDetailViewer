@@ -5,7 +5,7 @@ SPDX-License-Identifier: CC-BY-NC-SA-4.0
 
 Copyright (c) 2026 MioSleet
 
-本作品（图片批量筛选器 / Image Batch Filter）采用 CC BY-NC-SA 4.0 协议授权：
+本作品（ImageThumbToDetailViewer / 图片批量筛选器）采用 CC BY-NC-SA 4.0 协议授权：
 署名、非商业性使用、相同方式共享。
 
 -------------------------------------------------------------------------------
@@ -60,7 +60,7 @@ Notices:
 
 推荐署名格式 / Suggested form:
 
-  "图片批量筛选器 (Image Batch Filter) by MioSleet,
+  "ImageThumbToDetailViewer by MioSleet,
    licensed under CC BY-NC-SA 4.0.
    Source: https://github.com/miosleet/ImageThumbToDetailViewer. Changes: <有 / 无 — yes / no>."
 

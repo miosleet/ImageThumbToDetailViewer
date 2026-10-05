@@ -16,7 +16,7 @@ RAW：
     RAW/RWL/X3F/IIQ/MOS/MEF/ARI
 
 运行：
-    python raw_photo_browser.py
+    python ImageThumbToDetailViewer_v2.2.py
 """
 
 import os

@@ -1,4 +1,4 @@
-# 图片批量筛选器
+# ImageThumbToDetailViewer（图片批量筛选器）
 
 面向拍摄图片审图流程的桌面工具：缩略图浏览、大图查看、批量选择，并把选中的图片批量复制 / 移动到文件夹或回收站。支持RAW格式。
 
@@ -84,11 +84,11 @@
 ### 源码运行
 ```bash
 pip install PySide6 Pillow rawpy
-python raw_photo_browser_3.py
+python ImageThumbToDetailViewer_v3.py
 ```
 
 ### 已打包的单文件 exe
-直接双击 `dist/RAWPhotoBrowser3.exe`。采用窗口模式打包，**不会出现控制台黑框**。
+直接双击 `dist/ImageThumbToDetailViewer.exe`。采用窗口模式打包，**不会出现控制台黑框**。
 
 ---
 
