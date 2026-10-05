@@ -846,7 +846,7 @@ class MainWindow(QMainWindow):
             ("移动到新筛选文件夹", self.move_to_new_folder),
             ("移动到指定文件夹 (Ctrl+X)", self.move_to_folder),
             ("移动到回收站 (Del / Backspace)", self.move_to_recycle_bin),
-            ("批量拼接缩略图 (Ctrl+S)", self.stitch_selected),
+            ("导出拼接缩略图 (Ctrl+S)", self.stitch_selected),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
@@ -872,7 +872,7 @@ class MainWindow(QMainWindow):
         # ----------------------------------------------------
         # 快捷键
         # Ctrl+A / Esc：全选 / 全不选
-        # Ctrl+S：批量拼接缩略图
+        # Ctrl+S：导出拼接缩略图
         # Ctrl+C / Ctrl+X：复制 / 移动到指定文件夹
         # Del / Backspace：移动到回收站（仅图片视图聚焦时）
         # ----------------------------------------------------
@@ -1129,7 +1129,7 @@ class MainWindow(QMainWindow):
         self.sync_checked_to_edit()
 
     # --------------------------------------------------------
-    # 批量拼接缩略图
+    # 导出拼接缩略图
     # --------------------------------------------------------
 
     def stitch_selected(self):

@@ -10,40 +10,24 @@ Built with **PySide6**.
 
 ### Browsing
 - **Open Folder (打开文件夹)**: lists every supported image in the folder (current folder only, no recursion into subfolders), sorted by file name.
-- **Thumbnail grid**: shows thumbnails in a grid. Rendering is virtualized so only the visible tiles are drawn; images are loaded on demand in a background thread, so large folders won't freeze the UI.
-- **Zoom**: `Ctrl + wheel` steps through zoom levels, from a dense grid of about 10 columns up to single-image magnification (up to about 4x), and keeps the image under the cursor in the same spot after zooming.
+- **Thumbnail grid**: shows thumbnails as a grid. Virtualized rendering that only draws the visible tiles; images are loaded on demand in a background thread, so large folders won't freeze the UI.
+- **Zoom (Ctrl + wheel)**: steps through zoom levels, from a dense grid of about 10 columns up to single-image magnification (up to about 4x), and keeps the image under the cursor in the same spot after zooming.
 - **Full-quality single image**: in 1-image-per-row mode (including magnification), RAW files are re-decoded at full resolution in the background and swapped in, keeping the large view sharp;
 
 ### Selecting
 - **Click** anywhere on a tile: check / uncheck.
 - **Shift + click**: range selection (file-manager style).
-- **Match by file name**: type file names or fragments, separated by English / Chinese commas. An exact file-name match takes priority, then substring matching; each entry matches at most one file. The matches become the current selection, and manual selections are also written back to the input box.
-- **Select All**: check every image in the current folder in one click (`Ctrl + A`).
-- **Deselect All**: clear the selection (`Esc`).
+- **Match by file name (Enter)**: type file names or fragments, separated by English / Chinese commas. An exact file-name match takes priority, then substring matching; each entry matches at most one file. The matches become the current selection, and manual selections are also written back to the input box.
+- **Select All (Ctrl + A)**: check every image in the current folder in one click.
+- **Deselect All (Esc)**: clear the selection.
 
 ### Batch operations
-- **Copy to New Filter Folder / Move to New Filter Folder (复制到新筛选文件夹 / 移动到新筛选文件夹)**:
-  create `筛选_XX` next to the current folder, using the smallest unused number.
-- **Copy to Folder / Move to Folder (复制到指定文件夹 / 移动到指定文件夹)**: 
-  choose any destination folder. Uses the native system copy / move; on a name conflict it pops up the system's own conflict dialog (replace / skip / keep both). If the native call is unavailable, it falls back to a built-in conflict dialog (replace / replace all / skip / skip all).
-- **Move to Recycle Bin (移动到回收站)**: shows a confirmation dialog first, then sends the files to the recycle bin.
+- **Copy to New Filter Folder / Move to New Filter Folder**: create `筛选_XX` next to the current folder, using the smallest unused number. After a move, the thumbnail grid is refreshed.
+- **Copy to Folder (Ctrl + C) / Move to Folder (Ctrl + X)**: copy or move the selected images to any destination folder. Uses the native system copy / move; on a name conflict it pops up the system's own conflict dialog (replace / skip / keep both). If the native call is unavailable, it falls back to a built-in conflict dialog (replace / replace all / skip / skip all).
+- **Move to Recycle Bin (Del/Backspace)**: shows a confirmation dialog first, then sends the files to the recycle bin. After that, the thumbnail grid is refreshed.
 
-### Export
-- **Stitch Selected Thumbnails**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Exports as PNG / JPEG (`Ctrl + S`).
-
----
-
-## Usage
-
-1. Click **Open Folder (打开文件夹)** and choose the folder that holds your photos.
-   Thumbnails load progressively as you scroll; wait a moment for the current area to fill in.
-2. Zoom and browse with `Ctrl + wheel`.
-3. Pick the keepers — click tiles to check them, or type file names / fragments (comma-separated) in the input box and press **Enter** or click **Match Names (匹配文件名)**.
-4. Send the selected images to a destination:
-   - **Copy to New Filter Folder / Move to New Filter Folder** — creates `筛选_01`, `筛选_02`, … inside the source folder.
-   - **Copy to Folder / Move to Folder** — choose a destination folder; name conflicts are handled by the system dialog.
-   - **Move to Recycle Bin** — confirm, then delete to the recycle bin.
-5. Repeat the flow. Copy keeps the originals; after a move / delete the list refreshes automatically.
+### Export Stitched Thumbnails
+- **Export Stitched Thumbnails (Ctrl + S)**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Can be exported as PNG / JPEG.
 
 ---
 
@@ -58,7 +42,7 @@ Built with **PySide6**.
 | Shift + click | Range select |
 | Ctrl + A | Select all |
 | Esc | Deselect all |
-| Ctrl + S | Stitch selected thumbnails |
+| Ctrl + S | Export stitched thumbnails |
 | Ctrl + C | Copy to folder |
 | Ctrl + X | Move to folder |
 | Del / Backspace | Move to recycle bin (when the image view has focus) |
