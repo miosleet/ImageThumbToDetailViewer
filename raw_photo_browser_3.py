@@ -327,6 +327,9 @@ class PhotoView(QAbstractScrollArea):
         self.last_clicked_index = None
         self._last_visible = (-1, -1)
 
+        # 列表最前端的占位格数量（用于缩放时的横向微调，取值 0 ~ 列数-1）
+        self.placeholder = 0
+
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
         self.horizontalScrollBar().valueChanged.connect(self.viewport().update)
 
@@ -360,7 +363,8 @@ class PhotoView(QAbstractScrollArea):
 
         columns = self.columns()
         size = self.tile_size()
-        rows = (len(self.paths) + columns - 1) // columns if self.paths else 0
+        total = len(self.paths) + self.placeholder
+        rows = (total + columns - 1) // columns if total else 0
         return QSize(max(1, columns * size), max(1, rows * size))
 
     def _update_scrollbars(self):
@@ -387,6 +391,7 @@ class PhotoView(QAbstractScrollArea):
         self.hq_failed.clear()
         self.zoom_index = 0
         self.last_clicked_index = None
+        self.placeholder = 0
 
         self._update_scrollbars()
         self.viewport().update()
@@ -429,16 +434,27 @@ class PhotoView(QAbstractScrollArea):
         top = self.verticalScrollBar().value()
         bottom = top + self.viewport().height()
 
-        first_row = max(0, top // tile - 1)
-        last_row = min((len(self.paths) - 1) // columns, bottom // tile + 1)
+        total = len(self.paths) + self.placeholder
+        total_rows = (total + columns - 1) // columns
 
-        return first_row * columns, min(len(self.paths) - 1, (last_row + 1) * columns - 1)
+        first_row = max(0, top // tile - 1)
+        last_row = min(total_rows - 1, bottom // tile + 1)
+
+        # 位置 -> index（占位格占据最前面的若干位置，故需减去占位格数量）
+        first_index = max(0, first_row * columns - self.placeholder)
+        first_index = min(first_index, len(self.paths) - 1)
+        last_index = min(
+            len(self.paths) - 1,
+            (last_row + 1) * columns - 1 - self.placeholder,
+        )
+
+        return first_index, last_index
 
     def _tile_rect(self, index):
 
         columns = self.columns()
         size = self.tile_size()
-        row, column = divmod(index, columns)
+        row, column = divmod(index + self.placeholder, columns)
         return QRect(column * size, row * size, size, size)
 
     def index_at(self, pos):
@@ -449,7 +465,8 @@ class PhotoView(QAbstractScrollArea):
 
         x = pos.x() + self.horizontalScrollBar().value()
         y = pos.y() + self.verticalScrollBar().value()
-        index = (y // size) * self.columns() + (x // size)
+        position = (y // size) * self.columns() + (x // size)
+        index = position - self.placeholder
 
         return index if 0 <= index < len(self.paths) else None
 
@@ -500,8 +517,8 @@ class PhotoView(QAbstractScrollArea):
         # ====================================================
         # Ctrl + 滚轮：缩放
         #
-        # 记录缩放前左上角第一张图，缩放后让它仍位于第一行，
-        # 且所在行紧贴窗口最上边。
+        # 以鼠标所指的图片为锚点：通过上下滚动 + 在最前端插入占位格
+        # （相当于横向移动），使缩放前鼠标下的那张图缩放后仍在鼠标下。
         # ====================================================
 
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -514,15 +531,18 @@ class PhotoView(QAbstractScrollArea):
             old_index = self.zoom_index
             old_columns = self.columns()
             old_tile = max(1, self.tile_size())
+            old_placeholder = self.placeholder
             old_scroll_x = self.horizontalScrollBar().value()
             old_scroll_y = self.verticalScrollBar().value()
 
-            first_index = (old_scroll_y // old_tile) * old_columns
-            if self.paths:
-                first_index = min(first_index, len(self.paths) - 1)
-
             mouse = event.position().toPoint()
             old_content_x = old_scroll_x + mouse.x()
+
+            # 鼠标在图片格内的纵向相对位置（缩放后按比例保持）
+            offset_ratio = ((old_scroll_y + mouse.y()) % old_tile) / old_tile
+
+            # 鼠标当前所指的图片（落在占位格上则为 None）
+            anchor = self.index_at(mouse)
 
             step = 1 if delta > 0 else -1
             self.zoom_index = max(0, min(len(self.ZOOM_LEVELS) - 1, self.zoom_index + step))
@@ -531,23 +551,66 @@ class PhotoView(QAbstractScrollArea):
 
                 old_zoom = self.ZOOM_LEVELS[old_index]
                 new_zoom = self.zoom
-
-                self._update_scrollbars()
-
-                # 垂直：对齐到整行，保证第一行紧贴顶部
                 new_columns = self.columns()
                 new_tile = max(1, self.tile_size())
-                target_y = (first_index // new_columns) * new_tile
-                target_y = min(target_y, self.verticalScrollBar().maximum())
-                target_y = (target_y // new_tile) * new_tile
-                self.verticalScrollBar().setValue(target_y)
 
-                # 水平：保持鼠标位置作为缩放锚点
-                if old_zoom != 0:
-                    new_x = int(old_content_x * (new_zoom / old_zoom) - mouse.x())
-                    self.horizontalScrollBar().setValue(
-                        max(0, min(self.horizontalScrollBar().maximum(), new_x))
+                if anchor is not None:
+
+                    # 鼠标所在列
+                    column = min(max(mouse.x() // new_tile, 0), new_columns - 1)
+
+                    # 占位格数量：让 anchor 恰好落在鼠标所在列；
+                    # 超过一行的部分整行去掉，避免出现纯占位的空行
+                    placeholder = (column - anchor) % new_columns
+
+                    # anchor 加上占位格后的行
+                    row = (anchor + placeholder) // new_columns
+
+                    # 目标滚动位置：保持鼠标在格内的相对偏移
+                    target_y = row * new_tile + int(offset_ratio * new_tile) - mouse.y()
+
+                    # 已在最上端仍要向上 → 去掉所有占位格
+                    if old_scroll_y == 0 and target_y < 0:
+                        placeholder = 0
+                        target_y = 0
+
+                    self.placeholder = placeholder
+                    self._update_scrollbars()
+                    self.verticalScrollBar().setValue(
+                        max(0, min(self.verticalScrollBar().maximum(), target_y))
                     )
+
+                    # 多列模式横向由占位格决定；单列模式保持鼠标横向锚点
+                    if new_columns == 1 and old_zoom != 0:
+                        new_x = int(old_content_x * (new_zoom / old_zoom) - mouse.x())
+                        self.horizontalScrollBar().setValue(
+                            max(0, min(self.horizontalScrollBar().maximum(), new_x))
+                        )
+                    else:
+                        self.horizontalScrollBar().setValue(0)
+
+                else:
+
+                    # 鼠标不在图片上：沿用「第一张图保持第一行」
+                    first_index = max(
+                        0, (old_scroll_y // old_tile) * old_columns - old_placeholder
+                    )
+                    if self.paths:
+                        first_index = min(first_index, len(self.paths) - 1)
+
+                    self.placeholder = 0
+                    self._update_scrollbars()
+
+                    target_y = (first_index // new_columns) * new_tile
+                    target_y = min(target_y, self.verticalScrollBar().maximum())
+                    target_y = (target_y // new_tile) * new_tile
+                    self.verticalScrollBar().setValue(target_y)
+
+                    if old_zoom != 0:
+                        new_x = int(old_content_x * (new_zoom / old_zoom) - mouse.x())
+                        self.horizontalScrollBar().setValue(
+                            max(0, min(self.horizontalScrollBar().maximum(), new_x))
+                        )
 
                 self.viewport().update()
 
@@ -568,6 +631,15 @@ class PhotoView(QAbstractScrollArea):
             vertical_delta = pixel.y()
         if horizontal_delta == 0:
             horizontal_delta = pixel.x()
+
+        # 已在最上端仍向上滚动 → 去掉所有占位格
+        if (
+            vertical_delta > 0
+            and self.placeholder > 0
+            and self.verticalScrollBar().value() == 0
+        ):
+            self.placeholder = 0
+            self._update_scrollbars()
 
         if vertical_delta != 0:
 

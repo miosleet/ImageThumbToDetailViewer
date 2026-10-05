@@ -1,137 +1,106 @@
-# Image Batch Filter (图片批量筛选器)
+# 图片批量筛选器
 
-A desktop tool for the photo-review workflow: browse shot photos as thumbnails, inspect them
-full-size, mark the keepers, and batch copy / move the selection into folders or the recycle bin.
-It is not RAW-only — it works for everyday images too, with first-class RAW support.
+面向拍摄图片审图流程的桌面工具：缩略图浏览、大图查看、勾选分类，并把选中的图片批量复制 / 移动
+到文件夹或回收站。普通格式图片同样适用，同时对相机 RAW 提供良好支持。
 
-Built with **PySide6**.
-
----
-
-## Features
-
-### Browsing
-- **Open a folder** and list every supported image in it (current folder only, no recursion),
-  sorted by file name.
-- **Thumbnail grid** that only draws the visible tiles; images are decoded on demand in a
-  background thread, so the UI never blocks on a large folder.
-- **Zoom** with `Ctrl + wheel`, stepping from a dense grid (~10 columns) down to 3 / 2 / 1 column,
-  and single-image magnification up to 4x.
-  - When zooming, the current first image stays in the first row, and the top row stays flush
-    with the top of the window.
-- **Full-quality single image**: in 1-image-per-row mode (including magnification), RAW files are
-  re-decoded at full resolution in the background and swapped in, so the large view is sharp.
-  The grid keeps using fast embedded thumbnails / half-size previews.
-
-### Selecting
-- **Click** anywhere on a tile to check / uncheck it.
-- **Shift + click** for range selection (file-manager style).
-- **Match by file name**: type names or fragments separated by commas (`，` also works). A full
-  name match takes priority over a substring match; each token matches at most one file. The
-  result becomes the selection, and any manual selection is written back into the input box.
-
-### Batch operations
-- **Copy to New Filter Folder / Move to New Filter Folder** — creates `筛选_XX` next to the current
-  folder, using the smallest unused number (e.g. if `01,02,03,07` exist, the next is `04`).
-- **Copy to Folder / Move to Folder** — pick any destination folder. This uses the native Windows
-  copy / move, so conflicts show the system dialog (replace / skip / keep both). If the native
-  call is unavailable it falls back to a built-in conflict dialog
-  (Replace / Replace all / Skip / Skip all).
-- **Move to Recycle Bin** — asks for confirmation first, then sends the selection to the recycle bin.
-
-### Quality of life
-- After a successful copy, the selection and the input box are cleared.
-- After a move / recycle, the list refreshes automatically.
-- Memory-aware caches (preview + full-quality) keep large folders responsive.
+基于 **PySide6** 开发。
 
 ---
 
-## Supported formats
+## 功能
 
-- **Common**: JPG, JPEG, PNG, BMP, GIF, TIF, TIFF, WEBP
-- **RAW**: ARW, CR2, CR3, NEF, NRW, DNG, RAF, RW2, ORF, PEF, SR2, SRF, 3FR, ERF, KDC, MRW, RAW, RWL,
-  X3F, IIQ, MOS, MEF, ARI
+### 浏览
+- **打开文件夹**：列出该文件夹内所有支持的图片（仅当前文件夹，不递归子目录），按文件名排序。
+- **缩略图网格**：采用虚拟绘制，只画可视区域的格子；图片在后台线程按需读取，大文件夹也不会卡住界面。
+- **缩放**：`Ctrl + 滚轮` 逐档缩放，从约 10 列的密集网格缩略图显示，逐级放大到单图放大显示（最高约 4 倍）。
+  - 缩放以光标下的图片为锚点：缩放后该图仍停在光标下方，通过纵向滚动加上少量前导占位格使网格横向偏移来实现。
+  - 占位格数量始终少于一整行（多出的整行会被丢弃），因此不会出现整行都是占位格的情况；已经在顶部时继续向上滚动会清除这些占位格。
+  - 若光标不在图片上，则当前第一张图仍保持在第一行，且第一行紧贴窗口最上边。
+- **单图完整画质**：在每行 1 张（含放大）时，RAW 会在后台按完整分辨率重新解码并替换显示，保证大图清晰；
+
+### 选择
+- **单击**格子任意位置：勾选 / 取消勾选。
+- **Shift + 单击**：范围选择（类似文件管理器）。
+- **按文件名匹配**：输入文件名或片段，用英文 / 中文逗号分隔。完整文件名优先匹配，其次按“包含”匹配；
+  每个输入项最多匹配一个文件。匹配结果即成为当前勾选，手工勾选的内容也会同步回输入框。
+
+### 批量处理
+- **复制到新筛选文件夹 / 移动到新筛选文件夹**：在当前文件夹旁新建 `筛选_XX`，编号取最小的未占用值
+- **复制到指定文件夹 / 移动到指定文件夹**：自选任意目标文件夹。使用系统原生的复制 / 移动，
+  遇同名文件弹出系统自带的冲突对话框（替换 / 跳过 / 两者都保留）；若原生调用不可用，则退回内置冲突对话框
+  （替换 / 全部替换 / 跳过 / 全部跳过）。
+- **移动到回收站**：先弹出确认框，确认后送入回收站。
+
+### 体验细节
+- 复制成功后自动清空勾选与输入框。
+- 移动 / 删除成功后自动刷新列表。
+- 预览与完整画质分别做内存缓存与淘汰，浏览大文件夹更流畅。
 
 ---
 
-## Requirements
+## 支持的格式
 
-- **Windows** (native copy / move and recycle bin use the Windows shell)
-- Python 3.10+ only if you run from source
-- Packages: `PySide6`, `Pillow`, `rawpy`
+- **普通图片**：JPG、JPEG、PNG、BMP、GIF、TIF、TIFF、WEBP
+- **RAW**：ARW、CR2、CR3、NEF、NRW、DNG、RAF、RW2、ORF、PEF、SR2、SRF、3FR、ERF、KDC、MRW、
+  RAW、RWL、X3F、IIQ、MOS、MEF、ARI
 
 ---
 
-## Running
+## 运行环境
 
-### From source
+- **Windows**（原生复制 / 移动与回收站依赖 Windows 外壳）
+- 源码运行需要 Python 3.10+
+- 依赖库：`PySide6`、`Pillow`、`rawpy`
+
+---
+
+## 运行方式
+
+### 源码运行
 ```bash
 pip install PySide6 Pillow rawpy
 python raw_photo_browser_3.py
 ```
 
-### Prebuilt single-file exe
-Just double-click `dist/RAWPhotoBrowser3.exe`. It is built in windowed mode, so no console appears.
+### 已打包的单文件 exe
+直接双击 `dist/RAWPhotoBrowser3.exe`。采用窗口模式打包，**不会出现控制台黑框**。
 
 ---
 
-## Usage
+## 使用方式
 
-1. Click **打开文件夹 (Open Folder)** and choose the folder containing your shots.
-   Thumbnails stream in as you scroll; wait a moment for the visible area to fill in.
-2. Browse and zoom (`Ctrl + wheel`).
-3. Select the keepers — either click the tiles, or type file names / fragments in the input box
-   (comma-separated) and press **Enter** / click **匹配文件名 (Match Names)**.
-4. Send the selection to a destination:
-   - **复制到新筛选文件夹 / 移动到新筛选文件夹** — create `筛选_01`, `筛选_02`, … next to the source folder.
-   - **复制到指定文件夹 / 移动到指定文件夹** — choose any folder; name conflicts use the system dialog.
-   - **移动到回收站** — confirm, then remove to the recycle bin.
-5. Repeat. Copy keeps the originals; move / recycle refresh the list.
+1. 点击 **打开文件夹**，选择存放照片的文件夹。
+   缩略图会随滚动逐步加载，稍等片刻当前区域即可显示完整。
+2. 用 `Ctrl + 滚轮` 缩放浏览。
+3. 挑选保留的图片 —— 直接点击格子勾选，或在输入框输入文件名 / 片段（逗号分隔）后按 **回车**
+   或点 **匹配文件名**。
+4. 把选中的图片送到目标位置：
+   - **复制到新筛选文件夹 / 移动到新筛选文件夹** —— 在源文件夹旁生成 `筛选_01`、`筛选_02` …
+   - **复制到指定文件夹 / 移动到指定文件夹** —— 自选目标文件夹；同名冲突用系统对话框处理。
+   - **移动到回收站** —— 确认后删除到回收站。
+5. 重复以上流程。复制会保留原图；移动 / 删除后列表会自动刷新。
 
 ---
 
-## Shortcuts
+## 快捷键
 
-| Shortcut | Action |
+| 快捷键 | 功能 |
 | --- | --- |
-| `Ctrl + wheel` | Zoom in / out |
-| Wheel | Scroll vertically |
-| Horizontal wheel | Pan left / right |
-| `Shift + click` | Range select |
-| Click a tile | Check / uncheck |
-| `Ctrl + C` | Copy to folder |
-| `Ctrl + X` | Move to folder |
-| `Del` / `Backspace` | Move to recycle bin (when the image view has focus) |
-| `Enter` in the name box | Match names |
+| `Ctrl + 滚轮` | 放大 / 缩小 |
+| 滚轮 | 上下滚动 |
+| 横向滚轮 | 左右移动 |
+| `Shift + 单击` | 范围选择 |
+| 单击格子 | 勾选 / 取消 |
+| `Ctrl + C` | 复制到指定文件夹 |
+| `Ctrl + X` | 移动到指定文件夹 |
+| `Del` / `Backspace` | 移动到回收站（图片视图聚焦时） |
+| 输入框中按 `回车` | 匹配文件名 |
 
 ---
 
-## Notes
+## 说明
 
-- RAW grid previews use the camera's embedded thumbnail (or a half-size decode) for speed; the
-  single-image view upgrades to a full-resolution decode.
-- **Move to Recycle Bin** confirms first with a standard Yes / No dialog; the default button is
-  **Yes**, so pressing Enter confirms.
-- The **Ctrl + C** / **Ctrl + X** shortcuts are window-scoped, so they also fire when the name box
-  has focus. `Del` / `Backspace` are scoped to the image view to avoid interfering with text editing.
-- When running from source, progress is printed to the console; the packaged exe is silent.
-
----
-
-## Building a single-file exe (optional)
-
-```bash
-pip install pyinstaller
-python -m PyInstaller --noconfirm --onefile --windowed --name RAWPhotoBrowser3 --collect-all rawpy --exclude-module matplotlib --exclude-module tkinter --exclude-module scipy --exclude-module pandas --exclude-module IPython --exclude-module pytest raw_photo_browser_3.py
-```
-
-Output: `dist/RAWPhotoBrowser3.exe`.
-
----
-
-## Files
-
-- `raw_photo_browser_3.py` — application source (v3)
-- `raw_photo_browser_2.2.py` — previous version
-- `readme.md` — English documentation
-- `readme_zh.md` — Chinese documentation
+- RAW 网格预览使用相机内嵌缩略图（或半尺寸解码）以保证速度；单图模式会升级为完整分辨率解码。
+- **移动到回收站** 先弹出标准的“是 / 否”确认框，默认按钮为 **是**，因此直接按回车即确认。
+- `Ctrl + C` / `Ctrl + X` 为窗口级快捷键，焦点在输入框时同样生效；`Del` / `Backspace` 仅在图片视图聚焦时生效，避免影响文本编辑。
+- 源码运行时会在控制台打印读取 / 匹配等进度日志；打包后的 exe 不再显示控制台。
