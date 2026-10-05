@@ -10,7 +10,7 @@ Built with **PySide6**.
 
 ### Browsing
 - **Open Folder (打开文件夹)**: lists every supported image in the folder (current folder only, no recursion into subfolders), sorted by file name.
-- **Thumbnail grid**: virtualized rendering that only draws the visible tiles; images are loaded on demand in a background thread, so large folders won't freeze the UI.
+- **Thumbnail grid**: shows thumbnails in a grid. Rendering is virtualized so only the visible tiles are drawn; images are loaded on demand in a background thread, so large folders won't freeze the UI.
 - **Zoom**: `Ctrl + wheel` steps through zoom levels, from a dense grid of about 10 columns up to single-image magnification (up to about 4x), and keeps the image under the cursor in the same spot after zooming.
 - **Full-quality single image**: in 1-image-per-row mode (including magnification), RAW files are re-decoded at full resolution in the background and swapped in, keeping the large view sharp;
 
@@ -30,11 +30,6 @@ Built with **PySide6**.
 
 ### Export
 - **Stitch Selected Thumbnails**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Exports as PNG / JPEG (`Ctrl + S`).
-
-### Quality of life
-- After a successful copy, the selection and the input box are cleared automatically.
-- After a move / delete, the list refreshes automatically.
-- Previews and full-quality images are cached and evicted separately, so browsing large folders stays smooth.
 
 ---
 
