@@ -4,6 +4,16 @@
 """
 选片助手工作台（ImageThumbToDetailViewer v3）
 
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+Public License (CC BY-NC-SA 4.0)
+
+SPDX-License-Identifier: CC-BY-NC-SA-4.0
+
+Copyright (c) 2026 MioSleet(澪霰)
+
+本作品（选片助手工作台 / ImageThumbToDetailViewer）采用 CC BY-NC-SA 4.0 协议授权：
+署名、非商业性使用、相同方式共享。
+
 依赖：
     pip install PySide6 Pillow rawpy
 
