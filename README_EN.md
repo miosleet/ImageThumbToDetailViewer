@@ -1,6 +1,6 @@
 # ImageThumbToDetailViewer (选片助手工作台)
 
-A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, and export the selected images as a single image. Supports RAW.
+A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, exporting the selected images as a single image, and converting the selected images by format / file size / resolution. Supports RAW.
 
 Built with **PySide6**.
 
@@ -28,6 +28,13 @@ Built with **PySide6**.
 
 ### Export Stitched Thumbnails
 - **Export Stitched Thumbnails (Ctrl + S)**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Can be exported as PNG / JPEG.
+
+### Format / Size / Resolution Conversion
+- **Format Size Resolution Conversion**: converts the selected images to JPG / PNG and can adjust resolution and file size at the same time. Clicking it opens a settings dialog whose options are laid out as a "title row + content row":
+  - **Target format**: jpg / png, default jpg.
+  - **Resolution**: adjustable only when exactly 1 image is selected; the two inputs are pre-filled with that image's original width / height. A "等比" (keep aspect ratio) checkbox between width and height keeps the original aspect ratio in sync when either is edited; unchecking it reveals a "Resize mode" row — black bars / white bars / stretch / crop — for non-proportional scaling. With multiple images selected, only the title row is kept and the content shows "adjusting the resolution is only available when 1 image is selected".
+  - **File size**: an optional upper limit in MB; the output is made as large as possible while staying under that value (judged on the resized image): for JPG the quality is searched to approach the limit, while PNG is lossless so its size depends only on the resolution; leaving it blank exports at the highest quality without size conversion.
+  - **Output file**: choose the output folder (defaults to the current folder); clicking the folder path opens a folder picker. When exactly 1 image is selected the file name can be edited (the extension follows the target format and cannot be changed) and defaults to "{original name + conflict index}" — e.g. `aaa.png` to jpg becomes `aaa.jpg`, or `aaa(1).jpg` / `aaa(2).jpg` if those already exist. With multiple images only the folder can be chosen and the file name is hidden, using the same auto-avoid logic.
 
 ---
 

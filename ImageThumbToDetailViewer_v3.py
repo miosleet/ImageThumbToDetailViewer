@@ -1111,7 +1111,7 @@ class ConversionDialog(QDialog):
         self.width_edit.setFixedWidth(90)
         row.addWidget(self.width_edit)
 
-        self.lock_check = QCheckBox("⛓️")
+        self.lock_check = QCheckBox("等比")
         self.lock_check.setChecked(True)
         self.lock_check.setToolTip("勾选后修改宽或高，另一项按原始比例同步变化")
         row.addWidget(self.lock_check)
