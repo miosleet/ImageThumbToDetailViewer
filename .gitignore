@@ -2,3 +2,4 @@
 raw_photo_browser_3.zip
 /build
 /dist
+*.pyc

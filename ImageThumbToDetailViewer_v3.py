@@ -34,6 +34,7 @@ import re
 import shutil
 import sys
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -52,6 +53,10 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -59,6 +64,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -252,6 +258,205 @@ def load_image(path: str, full: bool = False) -> QImage:
         return pil_to_qimage(raw_to_pil(path, full=full))
     with Image.open(path) as im:
         return pil_to_qimage(im.copy())
+
+
+# ============================================================
+# 格式 / 大小 / 分辨率转换
+#
+# 供「格式大小分辨率转换」功能复用：读取完整图像、调整分辨率、
+# 控制导出文件大小，并最终写出到目标文件夹。
+# ============================================================
+
+# 不等比缩放时的处理方式：(标识, 界面文字)
+RESIZE_MODES = [
+    ("black", "黑边填充"),
+    ("white", "白边填充"),
+    ("stretch", "拉伸"),
+    ("crop", "裁切"),
+]
+
+
+def load_source_image(path: str) -> Image.Image:
+    """
+    以完整分辨率读取一张图片，返回完成 EXIF 方向校正的 PIL 图像。
+
+    RAW 走 rawpy 完整解码；普通图片直接读取并应用 EXIF 方向，
+    以保证转换时使用的图像与界面中看到的朝向一致。
+    """
+
+    if Path(path).suffix.lower() in RAW_EXTS:
+        return raw_to_pil(path, full=True)
+
+    with Image.open(path) as im:
+        return ImageOps.exif_transpose(im).copy()
+
+
+def resize_image(image: Image.Image, size, mode: str) -> Image.Image:
+    """
+    把图片调整为指定尺寸 size=(宽, 高)。
+
+    mode 取值：
+        "stretch"：强行拉伸（不保持比例）
+        "black"  ：等比缩放后在空白处填充黑色
+        "white"  ：等比缩放后在空白处填充白色
+        "crop"   ：等比缩放到覆盖目标后居中裁切
+    """
+
+    target_w = max(1, int(size[0]))
+    target_h = max(1, int(size[1]))
+
+    if mode == "stretch":
+        return image.resize((target_w, target_h), Image.LANCZOS)
+
+    # 等比缩放比例：裁切取较大值以铺满，其余取较小值以完整放入
+    if mode == "crop":
+        ratio = max(target_w / image.width, target_h / image.height)
+    else:
+        ratio = min(target_w / image.width, target_h / image.height)
+
+    new_w = max(1, round(image.width * ratio))
+    new_h = max(1, round(image.height * ratio))
+    resized = image.resize((new_w, new_h), Image.LANCZOS)
+
+    if mode == "crop":
+        left = (new_w - target_w) // 2
+        top = (new_h - target_h) // 2
+        return resized.crop((left, top, left + target_w, top + target_h))
+
+    # 黑边 / 白边填充
+    background = (0, 0, 0) if mode == "black" else (255, 255, 255)
+
+    if resized.mode == "RGBA":
+        canvas = Image.new("RGBA", (target_w, target_h), background + (255,))
+    else:
+        canvas = Image.new("RGB", (target_w, target_h), background)
+
+    canvas.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
+    return canvas
+
+
+def encode_image(image: Image.Image, fmt: str, quality: int = None) -> bytes:
+    """
+    把 PIL 图像编码为指定格式的字节数据。
+
+    fmt 为 "JPEG" 或 "PNG"；quality 仅对 JPEG 有效（对应 PS 中的品质，1~100）。
+    PNG 为无损格式，统一使用 optimize 尽量减小体积。
+    """
+
+    buffer = BytesIO()
+
+    if fmt == "JPEG":
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        quality = quality if quality else 100
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            # 品质 95 以上不做色度子采样，保证最高画质
+            subsampling=0 if quality >= 95 else 2,
+        )
+    else:
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGB")
+        image.save(buffer, format="PNG", optimize=True)
+
+    return buffer.getvalue()
+
+
+def find_jpeg_quality(image: Image.Image, max_bytes: int):
+    """
+    二分查找 JPEG 品质：在文件体积小于 max_bytes 的前提下，返回尽量大的品质值。
+
+    返回 (quality, data)：quality 为命中的品质，data 为对应编码字节；
+    若最低品质仍超过限制，则 quality 为 None，data 为最小体积的编码结果。
+    """
+
+    low, high = 1, 100
+    best_quality = None
+    best_data = None
+
+    while low <= high:
+
+        middle = (low + high) // 2
+        data = encode_image(image, "JPEG", middle)
+
+        if len(data) < max_bytes:
+            best_quality, best_data = middle, data
+            low = middle + 1
+        else:
+            high = middle - 1
+
+    if best_data is None:
+        best_data = encode_image(image, "JPEG", 1)
+
+    return best_quality, best_data
+
+
+def unique_stem(folder, stem: str, ext: str) -> str:
+    """
+    在 folder 中为「stem + ext」求一个不冲突的文件名（不含后缀部分）。
+
+    规则：无冲突时返回 stem；否则依次尝试 stem(1)、stem(2)…，
+    例如 aaa.jpg 已存在则返回 aaa(1)，同理 aaa(1).jpg 也存在则返回 aaa(2)。
+    """
+
+    folder = Path(folder)
+
+    if not (folder / f"{stem}{ext}").exists():
+        return stem
+
+    index = 1
+    while (folder / f"{stem}({index}){ext}").exists():
+        index += 1
+
+    return f"{stem}({index})"
+
+
+def convert_one_image(path, output_dir, fmt, ext,
+                      resize_size, resize_mode, max_bytes,
+                      output_stem=None, source_image=None):
+    """
+    转换单张图片并写入 output_dir，返回 (输出路径, 字节数, 使用的品质)。
+
+    流程：读取完整图像 -> 按需调整分辨率 -> 按需控制文件大小 -> 导出。
+    注意：文件大小以「调整过分辨率之后」的图像判断，故先缩放再编码。
+    output_stem 指定输出文件名（不含后缀），为空时使用原文件名；两者都会
+    在目标文件夹内自动避让同名文件（aaa -> aaa(1) -> aaa(2)…）。
+    source_image 非空时直接复用，避免重复读取（单张图片场景）。
+    """
+
+    image = source_image if source_image is not None else load_source_image(path)
+
+    if resize_size is not None:
+        image = resize_image(image, resize_size, resize_mode)
+
+    quality = None
+
+    if fmt == "JPEG":
+        if max_bytes:
+            quality, data = find_jpeg_quality(image, max_bytes)
+        else:
+            # 不限制大小时按最高品质导出
+            data = encode_image(image, "JPEG", 100)
+    else:
+        data = encode_image(image, "PNG")
+        if max_bytes and len(data) >= max_bytes:
+            print(
+                f"[提示] {Path(path).name} 为 PNG（无损），"
+                f"体积 {len(data) / 1024:.0f} KB 超过目标，"
+                "可通过降低分辨率进一步减小。",
+                flush=True,
+            )
+
+    stem = output_stem if output_stem else Path(path).stem
+    stem = unique_stem(output_dir, stem, ext)
+    target = Path(output_dir) / f"{stem}{ext}"
+
+    with open(target, "wb") as f:
+        f.write(data)
+
+    return target, len(data), quality
 
 
 # ============================================================
@@ -788,6 +993,383 @@ class PhotoView(QAbstractScrollArea):
 
 
 # ============================================================
+# 格式 / 大小 / 分辨率转换配置弹窗
+# ============================================================
+
+class ConversionDialog(QDialog):
+    """
+    格式 / 大小 / 分辨率转换的配置弹窗。
+
+    三个配置项均以「标题行 + 下方可选行」的形式排列：
+        1. 目标格式：jpg / png（默认 jpg）
+        2. 分辨率：仅单张图片可调，输入宽高，可勾选等比锁定；
+                   取消等比后可选择不等比缩放的处理方式
+        3. 文件大小：手动输入 MB，转换后体积尽量大但不超过该值
+        4. 输出文件：选择输出文件夹；单张图片时可修改文件名（后缀固定）
+    """
+
+    def __init__(self, count, source_size=None, source_stem=None,
+                 folder=None, parent=None):
+
+        super().__init__(parent)
+
+        self.count = count
+        self.source_size = source_size    # (宽, 高)，仅单张图片时非空
+        self.source_stem = source_stem    # 原文件名（不含后缀），仅单张图片时非空
+        self.folder = Path(folder) if folder else Path.home()
+        self.options = None               # 点击确定后写入的配置
+        self._syncing = False             # 防止宽高联动时递归触发
+        self._name_edited = False         # 用户是否手动修改过文件名
+
+        self.setWindowTitle("格式大小分辨率转换")
+        self.setMinimumWidth(520)
+
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+
+        root.addWidget(self._build_format_row())
+        root.addWidget(self._build_resolution_row())
+        root.addWidget(self._build_size_row())
+        root.addWidget(self._build_output_row())
+
+        # 格式变化时同步后缀并刷新默认文件名
+        self.jpg_radio.toggled.connect(self.on_format_changed)
+        self.png_radio.toggled.connect(self.on_format_changed)
+
+        # 初始化默认输出文件名（单张图片）
+        self.refresh_output_name()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("开始转换")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    # --------------------------------------------------------
+    # 界面构建
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _title(text):
+        """生成加粗的配置项标题标签。"""
+
+        label = QLabel(text)
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        return label
+
+    def _build_format_row(self):
+        """构建「目标格式」标题行与 jpg / png 单选行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._title("目标格式"))
+
+        row = QHBoxLayout()
+        self.jpg_radio = QRadioButton("jpg")
+        self.png_radio = QRadioButton("png")
+        self.jpg_radio.setChecked(True)   # 默认 jpg
+
+        self.format_group = QButtonGroup(self)
+        self.format_group.addButton(self.jpg_radio)
+        self.format_group.addButton(self.png_radio)
+
+        row.addWidget(self.jpg_radio)
+        row.addWidget(self.png_radio)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        return box
+
+    def _build_resolution_row(self):
+        """构建「分辨率」标题行与宽高输入行（含等比锁定与缩放方式选择）。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._title("分辨率"))
+
+        # 多张图片：保留标题行，仅在内容处提示不可用
+        if self.count != 1:
+            hint = QLabel("调整分辨率仅在选中1张图时可用")
+            hint.setStyleSheet("color: #888888;")
+            layout.addWidget(hint)
+            return box
+
+        # 宽 / 等比锁定 / 高
+        row = QHBoxLayout()
+        row.addWidget(QLabel("宽"))
+        self.width_edit = QLineEdit(str(self.source_size[0]))
+        self.width_edit.setFixedWidth(90)
+        row.addWidget(self.width_edit)
+
+        self.lock_check = QCheckBox("⛓️")
+        self.lock_check.setChecked(True)
+        self.lock_check.setToolTip("勾选后修改宽或高，另一项按原始比例同步变化")
+        row.addWidget(self.lock_check)
+
+        row.addWidget(QLabel("高"))
+        self.height_edit = QLineEdit(str(self.source_size[1]))
+        self.height_edit.setFixedWidth(90)
+        row.addWidget(self.height_edit)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        # 不等比缩放的处理方式（仅在取消等比后出现）
+        self.mode_box = QWidget()
+        mode_layout = QHBoxLayout(self.mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.addWidget(QLabel("缩放方式"))
+
+        self.mode_group = QButtonGroup(self)
+        for index, (value, text) in enumerate(RESIZE_MODES):
+            radio = QRadioButton(text)
+            radio.setProperty("mode", value)
+            if index == 0:
+                radio.setChecked(True)    # 默认黑边填充
+            self.mode_group.addButton(radio)
+            mode_layout.addWidget(radio)
+
+        mode_layout.addStretch(1)
+        layout.addWidget(self.mode_box)
+        self.mode_box.setVisible(False)
+
+        self.lock_check.toggled.connect(self.on_lock_toggled)
+        self.width_edit.textEdited.connect(self.on_width_edited)
+        self.height_edit.textEdited.connect(self.on_height_edited)
+
+        return box
+
+    def _build_size_row(self):
+        """构建「文件大小」标题行与 MB 输入行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._title("文件大小"))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("不超过"))
+        self.size_edit = QLineEdit()
+        self.size_edit.setPlaceholderText("留空则按最高品质导出")
+        self.size_edit.setFixedWidth(120)
+        row.addWidget(self.size_edit)
+        row.addWidget(QLabel("MB"))
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        hint = QLabel("JPG 通过品质控制体积；PNG 为无损格式，体积仅由分辨率决定。")
+        hint.setStyleSheet("color: #888888;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        return box
+
+    def _build_output_row(self):
+        """构建「输出文件」标题行与输出文件夹 / 文件名选择行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self._title("输出文件"))
+
+        # 文件夹：点击路径弹出选择窗口（默认当前所在文件夹）
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("文件夹"))
+        self.folder_button = QPushButton(str(self.folder))
+        self.folder_button.setToolTip("点击选择输出文件夹")
+        self.folder_button.setStyleSheet("text-align: left;")
+        self.folder_button.clicked.connect(self.choose_output_folder)
+        folder_row.addWidget(self.folder_button, 1)
+        layout.addLayout(folder_row)
+
+        # 文件名：仅单张图片可修改，后缀跟随目标格式且不可编辑
+        if self.count == 1:
+            name_row = QHBoxLayout()
+            name_row.addWidget(QLabel("文件名"))
+            self.name_edit = QLineEdit()
+            self.name_edit.setPlaceholderText("文件名（不含后缀）")
+            name_row.addWidget(self.name_edit, 1)
+
+            self.suffix_label = QLabel(self.current_ext())
+            self.suffix_label.setToolTip("后缀跟随目标格式，不可修改")
+            name_row.addWidget(self.suffix_label)
+            layout.addLayout(name_row)
+
+            self.name_edit.textEdited.connect(self.on_name_edited)
+
+        return box
+
+    def current_ext(self):
+        """返回当前目标格式对应的文件后缀。"""
+
+        return ".jpg" if self.jpg_radio.isChecked() else ".png"
+
+    def refresh_output_name(self):
+        """
+        重新计算默认文件名：{原文件名 + 冲突序号} + 后缀。
+
+        仅在单张图片、且用户尚未手动修改过文件名时生效。
+        """
+
+        if self.count != 1 or self._name_edited:
+            return
+
+        stem = unique_stem(self.folder, self.source_stem, self.current_ext())
+        self.name_edit.setText(stem)
+
+    def choose_output_folder(self):
+        """弹出文件夹选择窗口，更新输出文件夹并刷新默认文件名。"""
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择输出文件夹", str(self.folder)
+        )
+        if not folder:
+            return
+
+        self.folder = Path(folder)
+        self.folder_button.setText(str(self.folder))
+        self.refresh_output_name()
+
+    def on_format_changed(self, checked=False):
+        """切换目标格式时更新后缀显示，并刷新默认文件名。"""
+
+        if not hasattr(self, "suffix_label"):
+            return
+
+        self.suffix_label.setText(self.current_ext())
+        self.refresh_output_name()
+
+    def on_name_edited(self, text):
+        """记录用户已手动修改文件名，之后不再自动刷新。"""
+
+        self._name_edited = True
+
+    # --------------------------------------------------------
+    # 交互
+    # --------------------------------------------------------
+
+    def on_lock_toggled(self, checked):
+        """等比锁定开关：取消等比时显示不等比缩放的处理方式选择行。"""
+
+        self.mode_box.setVisible(not checked)
+
+    def on_width_edited(self, text):
+        """编辑宽度时，若处于等比锁定则同步修改高度。"""
+
+        if self._syncing or not self.lock_check.isChecked():
+            return
+        self._sync_other(text, self.height_edit, width_to_height=True)
+
+    def on_height_edited(self, text):
+        """编辑高度时，若处于等比锁定则同步修改宽度。"""
+
+        if self._syncing or not self.lock_check.isChecked():
+            return
+        self._sync_other(text, self.width_edit, width_to_height=False)
+
+    def _sync_other(self, text, other, width_to_height):
+        """按原始宽高比把另一输入框同步为等比值。"""
+
+        try:
+            value = int(text)
+        except ValueError:
+            return
+
+        if value <= 0:
+            return
+
+        src_w, src_h = self.source_size
+        self._syncing = True
+        if width_to_height:
+            other.setText(str(max(1, round(value * src_h / src_w))))
+        else:
+            other.setText(str(max(1, round(value * src_w / src_h))))
+        self._syncing = False
+
+    # --------------------------------------------------------
+    # 收集配置
+    # --------------------------------------------------------
+
+    def accept(self):
+        """校验输入并收集配置写入 self.options，然后关闭窗口。"""
+
+        options = {}
+
+        # 目标格式
+        options["format"] = "JPEG" if self.jpg_radio.isChecked() else "PNG"
+        options["ext"] = ".jpg" if options["format"] == "JPEG" else ".png"
+
+        # 分辨率（仅单张图片可调）
+        options["resize_size"] = None
+        options["resize_mode"] = "stretch"
+
+        if self.count == 1:
+            try:
+                width = int(self.width_edit.text())
+                height = int(self.height_edit.text())
+            except ValueError:
+                QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
+                return
+
+            if width <= 0 or height <= 0:
+                QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
+                return
+
+            options["resize_size"] = (width, height)
+            if not self.lock_check.isChecked():
+                options["resize_mode"] = (
+                    self.mode_group.checkedButton().property("mode")
+                )
+
+        # 文件大小
+        options["max_bytes"] = None
+        text = self.size_edit.text().strip()
+
+        if text:
+            try:
+                megabytes = float(text)
+            except ValueError:
+                QMessageBox.warning(self, "提示", "文件大小请输入数字（MB）。")
+                return
+
+            if megabytes <= 0:
+                QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
+                return
+
+            options["max_bytes"] = int(megabytes * 1024 * 1024)
+
+        # 输出文件
+        options["output_dir"] = str(self.folder)
+        options["output_stem"] = None
+
+        if self.count == 1:
+            stem = self.name_edit.text().strip()
+            if not stem:
+                QMessageBox.warning(self, "提示", "请输入文件名。")
+                return
+            if any(ch in stem for ch in '\\/:*?"<>|'):
+                QMessageBox.warning(
+                    self, "提示", '文件名不能包含 \\ / : * ? " < > | 字符。'
+                )
+                return
+            options["output_stem"] = stem
+
+        self.options = options
+        super().accept()
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 
@@ -857,6 +1439,7 @@ class MainWindow(QMainWindow):
             ("移动到指定文件夹 (Ctrl+X)", self.move_to_folder),
             ("移动到回收站 (Del / Backspace)", self.move_to_recycle_bin),
             ("导出拼接缩略图 (Ctrl+S)", self.stitch_selected),
+            ("格式大小分辨率转换", self.convert_format_size_resolution),
         ):
             button = QPushButton(text)
             button.clicked.connect(slot)
@@ -1274,6 +1857,107 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "拼接完成", message)
         self.statusBar().showMessage(
             f"拼接完成：{len(indices)} 张 -> {Path(path).name}"
+        )
+
+    # --------------------------------------------------------
+    # 格式 / 大小 / 分辨率转换
+    # --------------------------------------------------------
+
+    def convert_format_size_resolution(self):
+        """
+        弹出配置窗口，把选中的一组图片按格式 / 分辨率 / 文件大小进行转换。
+
+        单张图片时预先读取原图，用于在弹窗中显示原始分辨率，并在转换时复用；
+        转换结果写到弹窗中选择的输出文件夹（默认当前文件夹），同名文件自动避让。
+        """
+
+        if self.folder is None:
+            QMessageBox.warning(self, "提示", "请先打开图片文件夹。")
+            return
+
+        indices = self.selected_indices()
+
+        if not indices:
+            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
+            return
+
+        # 单张图片：预先读取完整图像，供弹窗显示原始宽高并在转换时复用
+        source_image = None
+        source_size = None
+        source_stem = None
+
+        if len(indices) == 1:
+            path = self.view.paths[indices[0]]
+            source_stem = Path(path).stem
+            try:
+                source_image = load_source_image(path)
+                source_size = source_image.size
+            except Exception as e:
+                QMessageBox.warning(self, "提示", f"读取图片失败：\n{e}")
+                return
+
+        dialog = ConversionDialog(
+            len(indices), source_size, source_stem, self.folder, self
+        )
+
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.options is None:
+            return
+
+        options = dialog.options
+
+        target_dir = Path(options["output_dir"])
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        count = 0
+        failed = []
+
+        try:
+            for position, index in enumerate(indices, 1):
+
+                path = self.view.paths[index]
+                print(f"[转换] {position}/{len(indices)}  {Path(path).name}", flush=True)
+
+                # 单张图片复用已读取的图像
+                reused = source_image if len(indices) == 1 else None
+
+                try:
+                    output, size, quality = convert_one_image(
+                        path,
+                        target_dir,
+                        options["format"],
+                        options["ext"],
+                        options["resize_size"],
+                        options["resize_mode"],
+                        options["max_bytes"],
+                        output_stem=options["output_stem"],
+                        source_image=reused,
+                    )
+                    count += 1
+                    note = f"，品质 {quality}" if quality else ""
+                    print(
+                        f"[转换完成] {output.name}  {size / 1024:.0f} KB{note}",
+                        flush=True,
+                    )
+
+                except Exception as e:
+                    failed.append((Path(path).name, str(e)))
+                    print(f"[转换失败] {Path(path).name}: {e}", flush=True)
+
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        message = f"已转换 {count} 张图片到：\n{target_dir}"
+
+        if failed:
+            message += "\n\n以下文件失败：\n" + "\n".join(
+                f"{name}：{error}" for name, error in failed[:10]
+            )
+
+        QMessageBox.information(self, "转换完成", message)
+        self.statusBar().showMessage(
+            f"转换完成：{count} 张 -> {target_dir.name}"
         )
 
     # --------------------------------------------------------
