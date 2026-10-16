@@ -529,6 +529,23 @@ def qimage_to_pil(qimage: QImage) -> Image.Image:
     return Image.frombytes("RGB", (width, height), b"".join(rows))
 
 
+def draw_image_centered(painter: QPainter, image: QImage, rect: QRect):
+    """在 rect 内等比缩放并居中绘制 image（保持长宽比，不拉伸）。"""
+
+    scaled = image.scaled(
+        rect.size(),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    painter.drawImage(
+        QPoint(
+            rect.left() + (rect.width() - scaled.width()) // 2,
+            rect.top() + (rect.height() - scaled.height()) // 2,
+        ),
+        scaled,
+    )
+
+
 def raw_to_pil(path: str, full: bool = False) -> Image.Image:
     """
     RAW 读取。
@@ -543,7 +560,6 @@ def raw_to_pil(path: str, full: bool = False) -> Image.Image:
             try:
                 thumb = raw.extract_thumb()
                 if thumb.format == rawpy.ThumbFormat.JPEG:
-                    from io import BytesIO
                     return Image.open(BytesIO(thumb.data)).convert("RGB")
                 if thumb.format == rawpy.ThumbFormat.BITMAP:
                     return Image.fromarray(thumb.data).convert("RGB")
@@ -1262,18 +1278,7 @@ class PhotoView(QAbstractScrollArea):
 
         if image is not None and not image.isNull():
 
-            scaled = image.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawImage(
-                QPoint(
-                    rect.left() + (rect.width() - scaled.width()) // 2,
-                    rect.top() + (rect.height() - scaled.height()) // 2,
-                ),
-                scaled,
-            )
+            draw_image_centered(painter, image, rect)
 
         elif index in self.errors:
 
@@ -1343,10 +1348,120 @@ class PhotoView(QAbstractScrollArea):
 
 
 # ============================================================
+# 导出弹窗公共基类
+#
+# 批量导出与单图导出的配置弹窗共享「目标格式」「文件大小」等
+# 通用配置行的构建，以及格式 / 体积参数的解析逻辑，统一放在此处。
+# ============================================================
+
+class ExportDialogBase(QDialog):
+
+    @staticmethod
+    def _section(title):
+        """构建「标题行 + 内容」的标准分区容器，返回 (容器, 纵向布局)。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        label = QLabel(title)
+        label.setObjectName("Title")
+        layout.addWidget(label)
+
+        return box, layout
+
+    @staticmethod
+    def _hint(text):
+        """构建灰色说明文字标签。"""
+
+        label = QLabel(text)
+        label.setObjectName("Hint")
+        label.setWordWrap(True)
+        return label
+
+    def _build_format_row(self):
+        """构建「目标格式」标题行与 jpg / png 单选行。"""
+
+        box, layout = self._section("目标格式")
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        self.jpg_radio = QRadioButton("jpg")
+        self.png_radio = QRadioButton("png")
+        self.jpg_radio.setChecked(True)   # 默认 jpg
+
+        self.format_group = QButtonGroup(self)
+        self.format_group.addButton(self.jpg_radio)
+        self.format_group.addButton(self.png_radio)
+
+        row.addWidget(self.jpg_radio)
+        row.addWidget(self.png_radio)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        return box
+
+    def _build_size_row(self):
+        """构建「文件大小」标题行与 MB 输入行。"""
+
+        box, layout = self._section("文件大小")
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("不超过"))
+        self.size_edit = QLineEdit()
+        self.size_edit.setPlaceholderText("留空则按最高品质导出")
+        self.size_edit.setFixedWidth(160)
+        row.addWidget(self.size_edit)
+        row.addWidget(QLabel("MB"))
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        layout.addWidget(self._hint(
+            "JPG 通过品质控制体积；PNG 为无损格式，体积仅由分辨率决定。"
+        ))
+
+        return box
+
+    def current_ext(self):
+        """返回当前目标格式对应的文件后缀。"""
+
+        return ".jpg" if self.jpg_radio.isChecked() else ".png"
+
+    def _collect_format(self):
+        """返回 (格式名, 后缀)，供导出配置使用。"""
+
+        fmt = "JPEG" if self.jpg_radio.isChecked() else "PNG"
+        return fmt, ".jpg" if fmt == "JPEG" else ".png"
+
+    @staticmethod
+    def _parse_max_bytes(text):
+        """把 MB 文本解析为字节数：留空返回 None，非法或非正抛出 ValueError。"""
+
+        text = text.strip()
+        if not text:
+            return None
+
+        megabytes = float(text)
+        if megabytes <= 0:
+            raise ValueError
+        return int(megabytes * 1024 * 1024)
+
+    def _choose_folder(self):
+        """弹出文件夹选择窗口，返回所选路径；未选择返回 None。"""
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择输出文件夹", str(self.folder)
+        )
+        return Path(folder) if folder else None
+
+
+# ============================================================
 # 格式 / 大小 / 分辨率转换配置弹窗
 # ============================================================
 
-class BatchExportDialog(QDialog):
+class BatchExportDialog(ExportDialogBase):
     """
     多张图片「图片调整导出」的配置弹窗。
 
@@ -1402,48 +1517,10 @@ class BatchExportDialog(QDialog):
     # 界面构建
     # --------------------------------------------------------
 
-    @staticmethod
-    def _title(text):
-        """生成加粗的配置项标题标签。"""
-
-        label = QLabel(text)
-        label.setObjectName("Title")
-        return label
-
-    def _build_format_row(self):
-        """构建「目标格式」标题行与 jpg / png 单选行。"""
-
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("目标格式"))
-
-        row = QHBoxLayout()
-        row.setSpacing(16)
-        self.jpg_radio = QRadioButton("jpg")
-        self.png_radio = QRadioButton("png")
-        self.jpg_radio.setChecked(True)   # 默认 jpg
-
-        self.format_group = QButtonGroup(self)
-        self.format_group.addButton(self.jpg_radio)
-        self.format_group.addButton(self.png_radio)
-
-        row.addWidget(self.jpg_radio)
-        row.addWidget(self.png_radio)
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        return box
-
     def _build_long_edge_row(self):
         """构建「长边最大像素」标题行与单值输入行。"""
 
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("长边最大像素"))
+        box, layout = self._section("长边最大像素")
 
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -1456,48 +1533,14 @@ class BatchExportDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
 
-        hint = QLabel("输入后每张图的最长边缩放到该数值，短边按比例缩放。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        return box
-
-    def _build_size_row(self):
-        """构建「文件大小」标题行与 MB 输入行。"""
-
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("文件大小"))
-
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        row.addWidget(QLabel("不超过"))
-        self.size_edit = QLineEdit()
-        self.size_edit.setPlaceholderText("留空则按最高品质导出")
-        self.size_edit.setFixedWidth(160)
-        row.addWidget(self.size_edit)
-        row.addWidget(QLabel("MB"))
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        hint = QLabel("JPG 通过品质控制体积；PNG 为无损格式，体积仅由分辨率决定。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout.addWidget(self._hint("输入后每张图的最长边缩放到该数值，短边按比例缩放。"))
 
         return box
 
     def _build_output_row(self):
         """构建「输出文件」标题行与输出文件夹选择行。"""
 
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("输出文件"))
+        box, layout = self._section("输出文件")
 
         # 文件夹：点击路径弹出选择窗口（默认当前所在文件夹）
         folder_row = QHBoxLayout()
@@ -1510,28 +1553,18 @@ class BatchExportDialog(QDialog):
         folder_row.addWidget(self.folder_button, 1)
         layout.addLayout(folder_row)
 
-        hint = QLabel("文件名沿用原文件名，同名文件自动添加序号。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout.addWidget(self._hint("文件名沿用原文件名，同名文件自动添加序号。"))
 
         return box
-
-    def current_ext(self):
-        """返回当前目标格式对应的文件后缀。"""
-
-        return ".jpg" if self.jpg_radio.isChecked() else ".png"
 
     def choose_output_folder(self):
         """弹出文件夹选择窗口，更新输出文件夹。"""
 
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择输出文件夹", str(self.folder)
-        )
-        if not folder:
+        folder = self._choose_folder()
+        if folder is None:
             return
 
-        self.folder = Path(folder)
+        self.folder = folder
         self.folder_button.setText(str(self.folder))
 
     # --------------------------------------------------------
@@ -1544,8 +1577,7 @@ class BatchExportDialog(QDialog):
         options = {}
 
         # 目标格式
-        options["format"] = "JPEG" if self.jpg_radio.isChecked() else "PNG"
-        options["ext"] = ".jpg" if options["format"] == "JPEG" else ".png"
+        options["format"], options["ext"] = self._collect_format()
 
         # 长边最大像素（留空则不调整分辨率）
         options["long_edge"] = None
@@ -1555,8 +1587,7 @@ class BatchExportDialog(QDialog):
             try:
                 long_edge = int(text)
             except ValueError:
-                QMessageBox.warning(self, "提示", "长边最大像素请输入正整数（px）。")
-                return
+                long_edge = 0
 
             if long_edge <= 0:
                 QMessageBox.warning(self, "提示", "长边最大像素请输入正整数（px）。")
@@ -1565,21 +1596,11 @@ class BatchExportDialog(QDialog):
             options["long_edge"] = long_edge
 
         # 文件大小
-        options["max_bytes"] = None
-        size_text = self.size_edit.text().strip()
-
-        if size_text:
-            try:
-                megabytes = float(size_text)
-            except ValueError:
-                QMessageBox.warning(self, "提示", "文件大小请输入数字（MB）。")
-                return
-
-            if megabytes <= 0:
-                QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
-                return
-
-            options["max_bytes"] = int(megabytes * 1024 * 1024)
+        try:
+            options["max_bytes"] = self._parse_max_bytes(self.size_edit.text())
+        except ValueError:
+            QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
+            return
 
         # 输出文件
         options["output_dir"] = str(self.folder)
@@ -2178,7 +2199,7 @@ class ImageEditView(QWidget):
         return canvas
 
 
-class SingleExportDialog(QDialog):
+class SingleExportDialog(ExportDialogBase):
     """
     单张图片「图片调整导出」的配置弹窗。
 
@@ -2281,22 +2302,10 @@ class SingleExportDialog(QDialog):
     # 界面构建
     # --------------------------------------------------------
 
-    @staticmethod
-    def _title(text):
-        """生成加粗的配置项标题标签。"""
-
-        label = QLabel(text)
-        label.setObjectName("Title")
-        return label
-
     def _build_resolution_row(self):
         """构建「分辨率」标题行与宽高输入行（含等比锁定）。"""
 
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("分辨率"))
+        box, layout = self._section("分辨率")
 
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -2317,10 +2326,9 @@ class SingleExportDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
 
-        hint = QLabel("取消等比后可分别设置宽高，左侧导出区域会同步改变长宽比。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout.addWidget(self._hint(
+            "取消等比后可分别设置宽高，左侧导出区域会同步改变长宽比。"
+        ))
 
         self.lock_check.toggled.connect(self.on_lock_toggled)
         self.width_edit.textEdited.connect(self.on_width_edited)
@@ -2331,11 +2339,7 @@ class SingleExportDialog(QDialog):
     def _build_slice_row(self):
         """构建「切片」标题行与 X / Y 数量、间隔输入行。"""
 
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("切片"))
+        box, layout = self._section("切片")
 
         x_row = QHBoxLayout()
         x_row.setSpacing(8)
@@ -2369,10 +2373,7 @@ class SingleExportDialog(QDialog):
         y_row.addStretch(1)
         layout.addLayout(y_row)
 
-        hint = QLabel("数量≥1，间隔≥0（单位：px）；默认 1×1 即不切分。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        layout.addWidget(self._hint("数量≥1，间隔≥0（单位：px）；默认 1×1 即不切分。"))
 
         for edit in (self.x_count_edit, self.x_gap_edit,
                      self.y_count_edit, self.y_gap_edit):
@@ -2380,67 +2381,10 @@ class SingleExportDialog(QDialog):
 
         return box
 
-    def _build_format_row(self):
-        """构建「目标格式」标题行与 jpg / png 单选行。"""
-
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("目标格式"))
-
-        row = QHBoxLayout()
-        row.setSpacing(16)
-        self.jpg_radio = QRadioButton("jpg")
-        self.png_radio = QRadioButton("png")
-        self.jpg_radio.setChecked(True)   # 默认 jpg
-
-        self.format_group = QButtonGroup(self)
-        self.format_group.addButton(self.jpg_radio)
-        self.format_group.addButton(self.png_radio)
-
-        row.addWidget(self.jpg_radio)
-        row.addWidget(self.png_radio)
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        return box
-
-    def _build_size_row(self):
-        """构建「文件大小」标题行与 MB 输入行。"""
-
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("文件大小"))
-
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        row.addWidget(QLabel("不超过"))
-        self.size_edit = QLineEdit()
-        self.size_edit.setPlaceholderText("留空则按最高品质导出")
-        self.size_edit.setFixedWidth(160)
-        row.addWidget(self.size_edit)
-        row.addWidget(QLabel("MB"))
-        row.addStretch(1)
-        layout.addLayout(row)
-
-        hint = QLabel("JPG 通过品质控制体积；PNG 为无损格式，体积仅由分辨率决定。")
-        hint.setObjectName("Hint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        return box
-
     def _build_output_row(self):
         """构建「输出文件」标题行与输出文件夹 / 文件名选择行。"""
 
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        layout.addWidget(self._title("输出文件"))
+        box, layout = self._section("输出文件")
 
         folder_row = QHBoxLayout()
         folder_row.setSpacing(10)
@@ -2473,11 +2417,6 @@ class SingleExportDialog(QDialog):
     # 交互 / 联动
     # --------------------------------------------------------
 
-    def current_ext(self):
-        """返回当前目标格式对应的文件后缀。"""
-
-        return ".jpg" if self.jpg_radio.isChecked() else ".png"
-
     def refresh_output_name(self):
         """
         重新计算默认文件名：{原文件名 + 冲突序号} + 后缀。
@@ -2494,13 +2433,11 @@ class SingleExportDialog(QDialog):
     def choose_output_folder(self):
         """弹出文件夹选择窗口，更新输出文件夹并刷新默认文件名。"""
 
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择输出文件夹", str(self.folder)
-        )
-        if not folder:
+        folder = self._choose_folder()
+        if folder is None:
             return
 
-        self.folder = Path(folder)
+        self.folder = folder
         self.folder_button.setText(str(self.folder))
         self.refresh_output_name()
 
@@ -2643,8 +2580,7 @@ class SingleExportDialog(QDialog):
         options = {}
 
         # 目标格式
-        options["format"] = "JPEG" if self.jpg_radio.isChecked() else "PNG"
-        options["ext"] = ".jpg" if options["format"] == "JPEG" else ".png"
+        options["format"], options["ext"] = self._collect_format()
 
         # 分辨率
         try:
@@ -2678,21 +2614,11 @@ class SingleExportDialog(QDialog):
             return
 
         # 文件大小
-        options["max_bytes"] = None
-        size_text = self.size_edit.text().strip()
-
-        if size_text:
-            try:
-                megabytes = float(size_text)
-            except ValueError:
-                QMessageBox.warning(self, "提示", "文件大小请输入数字（MB）。")
-                return
-
-            if megabytes <= 0:
-                QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
-                return
-
-            options["max_bytes"] = int(megabytes * 1024 * 1024)
+        try:
+            options["max_bytes"] = self._parse_max_bytes(self.size_edit.text())
+        except ValueError:
+            QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
+            return
 
         # 输出文件
         stem = self.name_edit.text().strip()
@@ -3125,10 +3051,9 @@ class MainWindow(QMainWindow):
         放大显示时列数为 1，即每行只有一张。
         """
 
-        indices = self.selected_indices()
+        indices = self._require_selection()
 
         if not indices:
-            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
             return
 
         # 当前档位的一行列数（放大显示时为 1）
@@ -3186,18 +3111,7 @@ class MainWindow(QMainWindow):
 
             if image is not None and not image.isNull():
 
-                scaled = image.scaled(
-                    rect.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                painter.drawImage(
-                    QPoint(
-                        rect.left() + (rect.width() - scaled.width()) // 2,
-                        rect.top() + (rect.height() - scaled.height()) // 2,
-                    ),
-                    scaled,
-                )
+                draw_image_centered(painter, image, rect)
 
             # 文件名（底部半透明条）
             bar_height = max(18, int(cell * 0.06))
@@ -3271,16 +3185,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先打开图片文件夹。")
             return
 
-        indices = self.selected_indices()
+        indices = self._require_selection()
 
         if not indices:
-            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
             return
 
         if len(indices) == 1:
             self._export_single(indices[0])
         else:
             self._export_batch(indices)
+
+    def _report_export(self, count, failed, target_dir):
+        """统一弹出导出结果提示并更新状态栏。"""
+
+        message = f"已导出 {count} 张图片到：\n{target_dir}"
+        if failed:
+            message += "\n\n以下文件失败：\n" + "\n".join(
+                f"{name}：{error}" for name, error in failed[:10]
+            )
+
+        QMessageBox.information(self, "导出完成", message)
+        self.statusBar().showMessage(f"导出完成：{count} 张 -> {target_dir.name}")
 
     def _export_single(self, index):
         """单张图片：可视化编辑后按需切片导出。"""
@@ -3363,14 +3288,7 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-        message = f"已导出 {count} 张图片到：\n{target_dir}"
-        if failed:
-            message += "\n\n以下文件失败：\n" + "\n".join(
-                f"{name}：{error}" for name, error in failed[:10]
-            )
-
-        QMessageBox.information(self, "导出完成", message)
-        self.statusBar().showMessage(f"导出完成：{count} 张 -> {target_dir.name}")
+        self._report_export(count, failed, target_dir)
 
     def _export_batch(self, indices):
         """多张图片：按长边像素等比缩放导出。"""
@@ -3418,14 +3336,7 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-        message = f"已导出 {count} 张图片到：\n{target_dir}"
-        if failed:
-            message += "\n\n以下文件失败：\n" + "\n".join(
-                f"{name}：{error}" for name, error in failed[:10]
-            )
-
-        QMessageBox.information(self, "导出完成", message)
-        self.statusBar().showMessage(f"导出完成：{count} 张 -> {target_dir.name}")
+        self._report_export(count, failed, target_dir)
 
     # --------------------------------------------------------
     # 文件搬运
@@ -3435,6 +3346,16 @@ class MainWindow(QMainWindow):
 
         self.match_names()
         return sorted(self.view.checked)
+
+    def _require_selection(self):
+        """返回选中的索引列表；无选择时提示用户并返回空列表。"""
+
+        indices = self.selected_indices()
+
+        if not indices:
+            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
+
+        return indices
 
     def next_filter_folder(self):
         """返回最小的、当前未被占用的「筛选_xx」目录。"""
@@ -3463,10 +3384,9 @@ class MainWindow(QMainWindow):
     def _collect(self, move):
         """收集待处理文件，返回 (indices, sources, verb)，无有效选择时返回 None。"""
 
-        indices = self.selected_indices()
+        indices = self._require_selection()
 
         if not indices:
-            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
             return None
 
         sources = [self.view.paths[i] for i in indices]
@@ -3640,10 +3560,9 @@ class MainWindow(QMainWindow):
     def move_to_recycle_bin(self):
         """将选中文件移动到回收站（需确认）。"""
 
-        indices = self.selected_indices()
+        indices = self._require_selection()
 
         if not indices:
-            QMessageBox.information(self, "提示", "没有匹配到任何文件。")
             return
 
         # 默认「是」，回车即选择「是」
