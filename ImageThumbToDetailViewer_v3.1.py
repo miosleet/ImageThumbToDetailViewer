@@ -14,11 +14,6 @@ Copyright (c) 2026 MioSleet(澪霰)
 本作品（选片助手工作台 / ImageThumbToDetailViewer）采用 CC BY-NC-SA 4.0 协议授权：
 署名、非商业性使用、相同方式共享。
 
-v4 相比 v3：重新设计了视觉呈现方式，采用现代化深色主题，
-按钮、输入框、滚动条、弹窗等改为统一的自绘样式，整体更简洁；
-并加入「降低内存占用模式」：网格预览以 QImageReader 按最长边上限
-降采样读取（测试阶段为 1280），单图模式仍读取完整尺寸原图。
-
 依赖：
     pip install PySide6 Pillow rawpy
 
@@ -35,6 +30,7 @@ v4 相比 v3：重新设计了视觉呈现方式，采用现代化深色主题�
 
 import ctypes
 import gc
+import math
 import os
 import re
 import shutil
@@ -46,18 +42,31 @@ from pathlib import Path
 from PIL import Image, ImageOps
 import rawpy
 
-from PySide6.QtCore import Qt, QObject, QPoint, QRect, QSize, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    Qt,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    QRectF,
+    QSize,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
     QImage,
     QImageReader,
+    QIntValidator,
     QKeySequence,
     QPainter,
     QPalette,
     QPen,
     QShortcut,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -115,6 +124,10 @@ QFrame#Panel {
     border: 1px solid #33333a;
     border-radius: 12px;
 }
+QWidget#Editor {
+    background-color: #202024;
+    border-left: 1px solid #2f2f36;
+}
 
 /* ---------- 文本 ---------- */
 QLabel {
@@ -130,6 +143,10 @@ QLabel#Hint {
 }
 QLabel#Title {
     color: #f0f0f2;
+    font-weight: 600;
+}
+QLabel#Warning {
+    color: #ff4d4d;
     font-weight: 600;
 }
 
@@ -357,22 +374,12 @@ def is_image_file(path: Path) -> bool:
 # ============================================================
 # 预览图分辨率（内存占用控制）
 #
-# 网格预览不再加载完整尺寸原图，而是按「最长边上限」降采样读取，
-# 从而显著降低内存占用。当前测试阶段固定为 1280（与正方形格子对应）。
-#
-# ★ 调整预览分辨率：修改下面这一行的 PREVIEW_MAX_EDGE 即可（单位：像素）。
-#   后续可把 preview_max_edge() 改为「根据系统剩余内存分级返回不同数值」：
-#      内存充裕 -> 更大幅度（更清晰）
-#      内存紧张 -> 更小幅度（更省内存）
+# 网格预览始终按「最长边上限」降采样读取，从而显著降低内存占用；
+# 单图模式仍读取完整尺寸原图。
+# 如需调整预览分辨率，修改下面这一行的 PREVIEW_MAX_EDGE 即可（单位：像素）。
 # ============================================================
 
 PREVIEW_MAX_EDGE = 1280
-
-
-def preview_max_edge() -> int:
-    """返回网格预览图的最长边上限（像素）。当前测试阶段固定为 1280。"""
-
-    return PREVIEW_MAX_EDGE
 
 
 # ============================================================
@@ -506,6 +513,22 @@ def pil_to_qimage(im: Image.Image) -> QImage:
                   QImage.Format.Format_RGB888).copy()
 
 
+def qimage_to_pil(qimage: QImage) -> Image.Image:
+    """QImage -> PIL。逐行拼接，兼容 Qt 对齐产生的行间填充。"""
+
+    qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
+    width = qimage.width()
+    height = qimage.height()
+    bytes_per_line = qimage.bytesPerLine()
+    data = bytes(qimage.constBits()[: qimage.sizeInBytes()])
+
+    rows = [
+        data[y * bytes_per_line: y * bytes_per_line + width * 3]
+        for y in range(height)
+    ]
+    return Image.frombytes("RGB", (width, height), b"".join(rows))
+
+
 def raw_to_pil(path: str, full: bool = False) -> Image.Image:
     """
     RAW 读取。
@@ -600,19 +623,11 @@ def load_image(path: str, full: bool = False, max_edge: int = None) -> QImage:
 
 
 # ============================================================
-# 格式 / 大小 / 分辨率转换
+# 图片调整导出
 #
-# 供「格式大小分辨率转换」功能复用：读取完整图像、调整分辨率、
-# 控制导出文件大小，并最终写出到目标文件夹。
+# 读取完整图像、按需缩放 / 裁切 / 切片、控制导出文件大小，
+# 并最终写出到目标文件夹。
 # ============================================================
-
-# 不等比缩放时的处理方式：(标识, 界面文字)
-RESIZE_MODES = [
-    ("black", "黑边填充"),
-    ("white", "白边填充"),
-    ("stretch", "拉伸"),
-    ("crop", "裁切"),
-]
 
 
 def load_source_image(path: str) -> Image.Image:
@@ -630,48 +645,23 @@ def load_source_image(path: str) -> Image.Image:
         return ImageOps.exif_transpose(im).copy()
 
 
-def resize_image(image: Image.Image, size, mode: str) -> Image.Image:
+def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
     """
-    把图片调整为指定尺寸 size=(宽, 高)。
+    等比缩放图片，使最长边等于 long_edge，短边按比例缩放（允许放大）。
 
-    mode 取值：
-        "stretch"：强行拉伸（不保持比例）
-        "black"  ：等比缩放后在空白处填充黑色
-        "white"  ：等比缩放后在空白处填充白色
-        "crop"   ：等比缩放到覆盖目标后居中裁切
+    长边为宽时按宽命中，长边为高时按高命中。
     """
 
-    target_w = max(1, int(size[0]))
-    target_h = max(1, int(size[1]))
+    width, height = image.size
 
-    if mode == "stretch":
-        return image.resize((target_w, target_h), Image.LANCZOS)
-
-    # 等比缩放比例：裁切取较大值以铺满，其余取较小值以完整放入
-    if mode == "crop":
-        ratio = max(target_w / image.width, target_h / image.height)
+    if width >= height:
+        new_w = long_edge
+        new_h = max(1, round(height * long_edge / width))
     else:
-        ratio = min(target_w / image.width, target_h / image.height)
+        new_h = long_edge
+        new_w = max(1, round(width * long_edge / height))
 
-    new_w = max(1, round(image.width * ratio))
-    new_h = max(1, round(image.height * ratio))
-    resized = image.resize((new_w, new_h), Image.LANCZOS)
-
-    if mode == "crop":
-        left = (new_w - target_w) // 2
-        top = (new_h - target_h) // 2
-        return resized.crop((left, top, left + target_w, top + target_h))
-
-    # 黑边 / 白边填充
-    background = (0, 0, 0) if mode == "black" else (255, 255, 255)
-
-    if resized.mode == "RGBA":
-        canvas = Image.new("RGBA", (target_w, target_h), background + (255,))
-    else:
-        canvas = Image.new("RGB", (target_w, target_h), background)
-
-    canvas.paste(resized, ((target_w - new_w) // 2, (target_h - new_h) // 2))
-    return canvas
+    return image.resize((new_w, new_h), Image.LANCZOS)
 
 
 def encode_image(image: Image.Image, fmt: str, quality: int = None) -> bytes:
@@ -732,6 +722,23 @@ def find_jpeg_quality(image: Image.Image, max_bytes: int):
     return best_quality, best_data
 
 
+def encode_with_limit(image: Image.Image, fmt: str, max_bytes: int):
+    """
+    按目标格式与体积上限编码，返回 (data, quality)。
+
+    JPEG 在给定体积上限下二分查找最高品质；PNG 为无损格式，
+    体积仅由分辨率决定，故忽略上限（返回的 quality 为 None）。
+    """
+
+    if fmt == "JPEG":
+        if max_bytes:
+            quality, data = find_jpeg_quality(image, max_bytes)
+            return data, quality
+        return encode_image(image, "JPEG", 100), None
+
+    return encode_image(image, "PNG"), None
+
+
 def unique_stem(folder, stem: str, ext: str) -> str:
     """
     在 folder 中为「stem + ext」求一个不冲突的文件名（不含后缀部分）。
@@ -752,44 +759,42 @@ def unique_stem(folder, stem: str, ext: str) -> str:
     return f"{stem}({index})"
 
 
-def convert_one_image(path, output_dir, fmt, ext,
-                      resize_size, resize_mode, max_bytes,
-                      output_stem=None, source_image=None):
+def unique_folder(parent, name: str) -> Path:
     """
-    转换单张图片并写入 output_dir，返回 (输出路径, 字节数, 使用的品质)。
+    在 parent 下为 name 求一个不冲突的文件夹路径。
 
-    流程：读取完整图像 -> 按需调整分辨率 -> 按需控制文件大小 -> 导出。
-    注意：文件大小以「调整过分辨率之后」的图像判断，故先缩放再编码。
-    output_stem 指定输出文件名（不含后缀），为空时使用原文件名；两者都会
+    规则：无冲突时返回 parent/name；否则依次尝试 name(1)、name(2)…
+    """
+
+    parent = Path(parent)
+
+    if not (parent / name).exists():
+        return parent / name
+
+    index = 1
+    while (parent / f"{name}({index})").exists():
+        index += 1
+
+    return parent / f"{name}({index})"
+
+
+def convert_batch_image(path, output_dir, fmt, ext, long_edge, max_bytes):
+    """
+    批量导出中的单张处理：读取完整图像 -> 按长边等比缩放（可选）
+    -> 按体积限制编码 -> 写出到 output_dir。
+
+    返回 (输出路径, 字节数, 使用的品质)；文件名沿用原文件名，
     在目标文件夹内自动避让同名文件（aaa -> aaa(1) -> aaa(2)…）。
-    source_image 非空时直接复用，避免重复读取（单张图片场景）。
     """
 
-    image = source_image if source_image is not None else load_source_image(path)
+    image = load_source_image(path)
 
-    if resize_size is not None:
-        image = resize_image(image, resize_size, resize_mode)
+    if long_edge:
+        image = resize_to_long_edge(image, long_edge)
 
-    quality = None
+    data, quality = encode_with_limit(image, fmt, max_bytes)
 
-    if fmt == "JPEG":
-        if max_bytes:
-            quality, data = find_jpeg_quality(image, max_bytes)
-        else:
-            # 不限制大小时按最高品质导出
-            data = encode_image(image, "JPEG", 100)
-    else:
-        data = encode_image(image, "PNG")
-        if max_bytes and len(data) >= max_bytes:
-            print(
-                f"[提示] {Path(path).name} 为 PNG（无损），"
-                f"体积 {len(data) / 1024:.0f} KB 超过目标，"
-                "可通过降低分辨率进一步减小。",
-                flush=True,
-            )
-
-    stem = output_stem if output_stem else Path(path).stem
-    stem = unique_stem(output_dir, stem, ext)
+    stem = unique_stem(output_dir, Path(path).stem, ext)
     target = Path(output_dir) / f"{stem}{ext}"
 
     with open(target, "wb") as f:
@@ -1341,32 +1346,27 @@ class PhotoView(QAbstractScrollArea):
 # 格式 / 大小 / 分辨率转换配置弹窗
 # ============================================================
 
-class ConversionDialog(QDialog):
+class BatchExportDialog(QDialog):
     """
-    格式 / 大小 / 分辨率转换的配置弹窗。
+    多张图片「图片调整导出」的配置弹窗。
 
-    三个配置项均以「标题行 + 下方可选行」的形式排列：
+    配置项均以「标题行 + 下方可选行」的形式排列：
         1. 目标格式：jpg / png（默认 jpg）
-        2. 分辨率：仅单张图片可调，输入宽高，可勾选等比锁定；
-                   取消等比后可选择不等比缩放的处理方式
-        3. 文件大小：手动输入 MB，转换后体积尽量大但不超过该值
-        4. 输出文件：选择输出文件夹；单张图片时可修改文件名（后缀固定）
+        2. 长边最大像素：留空则不调整分辨率；输入则等比缩放，
+                        使每张图最长边等于该数值，短边按比例缩放
+        3. 文件大小：手动输入 MB，导出后体积尽量大但不超过该值
+        4. 输出文件：选择输出文件夹（文件名沿用原文件名）
     """
 
-    def __init__(self, count, source_size=None, source_stem=None,
-                 folder=None, parent=None):
+    def __init__(self, count, folder=None, parent=None):
 
         super().__init__(parent)
 
         self.count = count
-        self.source_size = source_size    # (宽, 高)，仅单张图片时非空
-        self.source_stem = source_stem    # 原文件名（不含后缀），仅单张图片时非空
         self.folder = Path(folder) if folder else Path.home()
-        self.options = None               # 点击确定后写入的配置
-        self._syncing = False             # 防止宽高联动时递归触发
-        self._name_edited = False         # 用户是否手动修改过文件名
+        self.options = None               # 点击导出后写入的配置
 
-        self.setWindowTitle("格式大小分辨率转换")
+        self.setWindowTitle("图片调整导出")
         self.setMinimumWidth(520)
 
         root = QVBoxLayout(self)
@@ -1374,16 +1374,9 @@ class ConversionDialog(QDialog):
         root.setSpacing(16)
 
         root.addWidget(self._build_format_row())
-        root.addWidget(self._build_resolution_row())
+        root.addWidget(self._build_long_edge_row())
         root.addWidget(self._build_size_row())
         root.addWidget(self._build_output_row())
-
-        # 格式变化时同步后缀并刷新默认文件名
-        self.jpg_radio.toggled.connect(self.on_format_changed)
-        self.png_radio.toggled.connect(self.on_format_changed)
-
-        # 初始化默认输出文件名（单张图片）
-        self.refresh_output_name()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -1391,11 +1384,16 @@ class ConversionDialog(QDialog):
         )
         ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
         cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
-        ok_button.setText("开始转换")
+        ok_button.setText("开始导出")
         cancel_button.setText("取消")
         set_button_role(ok_button, "primary")
         ok_button.setMinimumWidth(96)
         cancel_button.setMinimumWidth(80)
+        # 开始导出不绑定 Enter，也不设默认按钮
+        ok_button.setAutoDefault(False)
+        ok_button.setDefault(False)
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
@@ -1438,8 +1436,861 @@ class ConversionDialog(QDialog):
 
         return box
 
+    def _build_long_edge_row(self):
+        """构建「长边最大像素」标题行与单值输入行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title("长边最大像素"))
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("长边"))
+        self.long_edge_edit = QLineEdit()
+        self.long_edge_edit.setPlaceholderText("留空则不调整分辨率")
+        self.long_edge_edit.setFixedWidth(160)
+        row.addWidget(self.long_edge_edit)
+        row.addWidget(QLabel("px"))
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        hint = QLabel("输入后每张图的最长边缩放到该数值，短边按比例缩放。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        return box
+
+    def _build_size_row(self):
+        """构建「文件大小」标题行与 MB 输入行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title("文件大小"))
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("不超过"))
+        self.size_edit = QLineEdit()
+        self.size_edit.setPlaceholderText("留空则按最高品质导出")
+        self.size_edit.setFixedWidth(160)
+        row.addWidget(self.size_edit)
+        row.addWidget(QLabel("MB"))
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        hint = QLabel("JPG 通过品质控制体积；PNG 为无损格式，体积仅由分辨率决定。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        return box
+
+    def _build_output_row(self):
+        """构建「输出文件」标题行与输出文件夹选择行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title("输出文件"))
+
+        # 文件夹：点击路径弹出选择窗口（默认当前所在文件夹）
+        folder_row = QHBoxLayout()
+        folder_row.setSpacing(10)
+        folder_row.addWidget(QLabel("文件夹"))
+        self.folder_button = QPushButton(str(self.folder))
+        self.folder_button.setToolTip("点击选择输出文件夹")
+        set_button_role(self.folder_button, "field")
+        self.folder_button.clicked.connect(self.choose_output_folder)
+        folder_row.addWidget(self.folder_button, 1)
+        layout.addLayout(folder_row)
+
+        hint = QLabel("文件名沿用原文件名，同名文件自动添加序号。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        return box
+
+    def current_ext(self):
+        """返回当前目标格式对应的文件后缀。"""
+
+        return ".jpg" if self.jpg_radio.isChecked() else ".png"
+
+    def choose_output_folder(self):
+        """弹出文件夹选择窗口，更新输出文件夹。"""
+
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择输出文件夹", str(self.folder)
+        )
+        if not folder:
+            return
+
+        self.folder = Path(folder)
+        self.folder_button.setText(str(self.folder))
+
+    # --------------------------------------------------------
+    # 收集配置
+    # --------------------------------------------------------
+
+    def accept(self):
+        """校验输入并收集配置写入 self.options，然后关闭窗口。"""
+
+        options = {}
+
+        # 目标格式
+        options["format"] = "JPEG" if self.jpg_radio.isChecked() else "PNG"
+        options["ext"] = ".jpg" if options["format"] == "JPEG" else ".png"
+
+        # 长边最大像素（留空则不调整分辨率）
+        options["long_edge"] = None
+        text = self.long_edge_edit.text().strip()
+
+        if text:
+            try:
+                long_edge = int(text)
+            except ValueError:
+                QMessageBox.warning(self, "提示", "长边最大像素请输入正整数（px）。")
+                return
+
+            if long_edge <= 0:
+                QMessageBox.warning(self, "提示", "长边最大像素请输入正整数（px）。")
+                return
+
+            options["long_edge"] = long_edge
+
+        # 文件大小
+        options["max_bytes"] = None
+        size_text = self.size_edit.text().strip()
+
+        if size_text:
+            try:
+                megabytes = float(size_text)
+            except ValueError:
+                QMessageBox.warning(self, "提示", "文件大小请输入数字（MB）。")
+                return
+
+            if megabytes <= 0:
+                QMessageBox.warning(self, "提示", "文件大小请输入正数（MB）。")
+                return
+
+            options["max_bytes"] = int(megabytes * 1024 * 1024)
+
+        # 输出文件
+        options["output_dir"] = str(self.folder)
+
+        self.options = options
+        super().accept()
+
+
+# ============================================================
+# 单图「图片调整导出」——可视化编辑
+# ============================================================
+
+class ImageEditView(QWidget):
+    """
+    单图调整导出的左侧预览窗。
+
+    以「导出区域」界定最终导出画面：区域内颜色正常，区域外变暗但仍可见。
+    提供类似 PS 变形的交互：
+        - 四角控制点：拖动等比例缩放（以对角为锚点）；
+        - 四边中点控制点：拖动绕图片中心旋转；
+        - 按住图片非控制点区域拖动：平移图片；
+        - 滚轮：缩放整个编辑画面（导出区域中心始终位于窗口中心）。
+    导出区域内还会绘制切片线（亮蓝色）与切片间隔遮罩（黑色）。
+    """
+
+    coverageChanged = Signal(bool)
+
+    def __init__(self, image: QImage, out_w: int, out_h: int, parent=None):
+
+        super().__init__(parent)
+
+        self.image = image
+
+        # 图片变换（场景坐标 == 原始图片像素坐标）
+        self.image_center = QPointF(image.width() / 2, image.height() / 2)
+        self.image_scale = 1.0
+        self.image_angle = 0.0
+
+        # 导出区域（场景坐标下的轴对齐矩形）
+        self.export_rect = QRectF(0, 0, image.width(), image.height())
+
+        # 输出分辨率与切片参数（切片间隔单位为「输出像素」）
+        self.out_w = float(out_w)
+        self.out_h = float(out_h)
+        self.x_count = 1
+        self.x_gap = 0
+        self.y_count = 1
+        self.y_gap = 0
+
+        self.view_scale = 1.0
+        self.view_pan = QPointF(0, 0)     # 视图平移（窗口像素，右键拖动）
+        self._fitted = False
+        self._covered = True
+
+        # 拖拽状态
+        self._drag_mode = None            # "corner" / "rotate" / "move"
+        self._drag_start = QPointF()
+        self._start_scale = 1.0
+        self._start_angle = 0.0
+        self._start_center = QPointF()
+        self._anchor = QPointF()          # 角缩放时的对角锚点（场景坐标）
+        self._start_dist = 1.0
+        self._start_mouse_angle = 0.0
+
+        # 右键平移查看范围的状态
+        self._panning = False
+        self._pan_start = QPointF()
+        self._pan_start_view = QPointF()
+
+        self.setMinimumSize(360, 300)
+        self.setMouseTracking(True)
+
+        self._refresh_coverage()
+
+    # --------------------------------------------------------
+    # 尺寸 / 参数
+    # --------------------------------------------------------
+
+    def set_output_size(self, out_w, out_h):
+        """更新输出分辨率，并按新的宽高比调整导出区域（保持中心与宽度）。"""
+
+        if out_w <= 0 or out_h <= 0:
+            return
+
+        self.out_w = float(out_w)
+        self.out_h = float(out_h)
+
+        center = self.export_rect.center()
+        width = self.export_rect.width()
+        height = width * self.out_h / self.out_w
+        self.export_rect = QRectF(
+            center.x() - width / 2, center.y() - height / 2, width, height
+        )
+        self._refresh_coverage()
+        self.update()
+
+    def set_slices(self, x_count, x_gap, y_count, y_gap):
+        """更新切片参数（数量≥1、间隔≥0，间隔单位为输出像素）。"""
+
+        self.x_count = max(1, int(x_count))
+        self.x_gap = max(0, int(x_gap))
+        self.y_count = max(1, int(y_count))
+        self.y_gap = max(0, int(y_gap))
+        self.update()
+
+    # --------------------------------------------------------
+    # 覆盖检测
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _point_in_quad(point: QPointF, quad) -> bool:
+        """判断点是否落在凸四边形内（边界视为在内）。"""
+
+        sign = 0
+        count = len(quad)
+
+        for i in range(count):
+            a = quad[i]
+            b = quad[(i + 1) % count]
+            cross = ((b.x() - a.x()) * (point.y() - a.y())
+                     - (b.y() - a.y()) * (point.x() - a.x()))
+            if abs(cross) < 1e-9:
+                continue
+            current = 1 if cross > 0 else -1
+            if sign == 0:
+                sign = current
+            elif current != sign:
+                return False
+
+        return True
+
+    def is_covered(self) -> bool:
+        """导出区域是否被图片完全覆盖（导出区域四角都落在图片四边形内）。"""
+
+        quad = self._corner_points_scene()
+        rect = self.export_rect
+        corners = [
+            QPointF(rect.left(), rect.top()),
+            QPointF(rect.right(), rect.top()),
+            QPointF(rect.right(), rect.bottom()),
+            QPointF(rect.left(), rect.bottom()),
+        ]
+        return all(self._point_in_quad(point, quad) for point in corners)
+
+    def _refresh_coverage(self):
+        """重新计算覆盖状态，并在变化时发出信号。"""
+
+        covered = self.is_covered()
+        if covered != self._covered:
+            self._covered = covered
+            self.coverageChanged.emit(covered)
+        return covered
+
+    def reset(self):
+        """恢复到刚导入的状态（撤销缩放 / 旋转 / 平移 / 导出区域 / 切分）。"""
+
+        self.image_center = QPointF(self.image.width() / 2, self.image.height() / 2)
+        self.image_scale = 1.0
+        self.image_angle = 0.0
+        self.export_rect = QRectF(0, 0, self.image.width(), self.image.height())
+        self.out_w = float(self.image.width())
+        self.out_h = float(self.image.height())
+        self.x_count = 1
+        self.x_gap = 0
+        self.y_count = 1
+        self.y_gap = 0
+
+        self.view_pan = QPointF(0, 0)
+        self._refresh_coverage()
+        self.fit_view()
+
+    # --------------------------------------------------------
+    # 坐标变换
+    # --------------------------------------------------------
+
+    def _view_transform(self):
+        """返回 (缩放, 平移x, 平移y)，导出区域中心默认位于窗口中心，可被右键平移。"""
+
+        scale = self.view_scale
+        center = self.export_rect.center()
+        tx = self.width() / 2 - center.x() * scale + self.view_pan.x()
+        ty = self.height() / 2 - center.y() * scale + self.view_pan.y()
+        return scale, tx, ty
+
+    def scene_to_widget(self, point: QPointF) -> QPointF:
+        scale, tx, ty = self._view_transform()
+        return QPointF(point.x() * scale + tx, point.y() * scale + ty)
+
+    def widget_to_scene(self, point: QPointF) -> QPointF:
+        scale, tx, ty = self._view_transform()
+        return QPointF((point.x() - tx) / scale, (point.y() - ty) / scale)
+
+    def _visible_scene_rect(self) -> QRectF:
+        scale, tx, ty = self._view_transform()
+        left = -tx / scale
+        top = -ty / scale
+        right = (self.width() - tx) / scale
+        bottom = (self.height() - ty) / scale
+        return QRectF(left, top, right - left, bottom - top)
+
+    def image_transform(self) -> QTransform:
+        transform = QTransform()
+        transform.translate(self.image_center.x(), self.image_center.y())
+        transform.rotate(self.image_angle)
+        transform.scale(self.image_scale, self.image_scale)
+        return transform
+
+    def _corner_points_scene(self):
+        transform = self.image_transform()
+        half_w = self.image.width() / 2
+        half_h = self.image.height() / 2
+        return [
+            transform.map(QPointF(-half_w, -half_h)),
+            transform.map(QPointF(half_w, -half_h)),
+            transform.map(QPointF(half_w, half_h)),
+            transform.map(QPointF(-half_w, half_h)),
+        ]
+
+    @staticmethod
+    def _midpoint(a: QPointF, b: QPointF) -> QPointF:
+        return QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2)
+
+    def _mid_points_scene(self):
+        corners = self._corner_points_scene()
+        return [
+            self._midpoint(corners[0], corners[1]),
+            self._midpoint(corners[1], corners[2]),
+            self._midpoint(corners[2], corners[3]),
+            self._midpoint(corners[3], corners[0]),
+        ]
+
+    def _handles(self):
+        """返回 [(类型, 序号, 窗口坐标点)]，类型为 corner / rotate。"""
+
+        handles = []
+        for index, point in enumerate(self._corner_points_scene()):
+            handles.append(("corner", index, self.scene_to_widget(point)))
+        for index, point in enumerate(self._mid_points_scene()):
+            handles.append(("rotate", index, self.scene_to_widget(point)))
+        return handles
+
+    def _image_contains_scene(self, point: QPointF) -> bool:
+        inverted, ok = self.image_transform().inverted()
+        if not ok:
+            return False
+        local = inverted.map(point)
+        return (abs(local.x()) <= self.image.width() / 2
+                and abs(local.y()) <= self.image.height() / 2)
+
+    def fit_view(self):
+        """把导出区域缩放到窗口内（留出边距），仅在首次显示时调用。"""
+
+        rect = self.export_rect
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        margin = 0.9
+        scale_x = self.width() * margin / rect.width()
+        scale_y = self.height() * margin / rect.height()
+        self.view_scale = max(0.01, min(scale_x, scale_y))
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._fitted:
+            self._fitted = True
+            self.fit_view()
+
+    # --------------------------------------------------------
+    # 绘制
+    # --------------------------------------------------------
+
+    def _draw_image(self, painter):
+        painter.save()
+        painter.translate(self.image_center)
+        painter.rotate(self.image_angle)
+        painter.scale(self.image_scale, self.image_scale)
+        painter.drawImage(
+            QRectF(-self.image.width() / 2, -self.image.height() / 2,
+                   self.image.width(), self.image.height()),
+            self.image,
+        )
+        painter.restore()
+
+    def paintEvent(self, event):
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.fillRect(self.rect(), QColor(24, 24, 26))
+
+        scale, tx, ty = self._view_transform()
+
+        painter.save()
+        painter.translate(tx, ty)
+        painter.scale(scale, scale)
+
+        visible = self._visible_scene_rect()
+
+        # 图片
+        self._draw_image(painter)
+
+        # 导出区域以外整体变暗
+        painter.fillRect(visible, QColor(0, 0, 0, 150))
+
+        # 导出区域内恢复正常亮度（先铺红色底再重绘图片，
+        # 原图未覆盖处即露出红色，提示该区域将不被原图覆盖）
+        painter.save()
+        painter.setClipRect(self.export_rect)
+        painter.fillRect(self.export_rect, QColor(0xFF, 0x00, 0x00))
+        self._draw_image(painter)
+        painter.restore()
+
+        # 切片间隔遮罩 + 切片线
+        self._paint_slices(painter)
+
+        # 导出区域边框
+        border = QPen(QColor(235, 235, 240))
+        border.setCosmetic(True)
+        painter.setPen(border)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.export_rect)
+
+        painter.restore()
+
+        # 控制点（窗口坐标，尺寸恒定）
+        self._paint_handles(painter)
+
+        # 底部操作提示
+        self._paint_hint(painter)
+
+        painter.end()
+
+    def _paint_slices(self, painter):
+
+        rect = self.export_rect
+        if self.out_w <= 0 or self.out_h <= 0 or rect.width() <= 0:
+            return
+
+        scale_x = rect.width() / self.out_w
+        scale_y = rect.height() / self.out_h
+
+        slice_w = (self.out_w - (self.x_count - 1) * self.x_gap) / self.x_count
+        slice_h = (self.out_h - (self.y_count - 1) * self.y_gap) / self.y_count
+
+        if slice_w <= 0 or slice_h <= 0:
+            return
+
+        # 间隔遮罩（黑色）
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 220)))
+
+        if self.x_count > 1 and self.x_gap > 0:
+            step = slice_w + self.x_gap
+            for i in range(self.x_count - 1):
+                left = step * (i + 1) - self.x_gap
+                painter.drawRect(QRectF(
+                    rect.left() + left * scale_x, rect.top(),
+                    self.x_gap * scale_x, rect.height(),
+                ))
+
+        if self.y_count > 1 and self.y_gap > 0:
+            step = slice_h + self.y_gap
+            for i in range(self.y_count - 1):
+                top = step * (i + 1) - self.y_gap
+                painter.drawRect(QRectF(
+                    rect.left(), rect.top() + top * scale_y,
+                    rect.width(), self.y_gap * scale_y,
+                ))
+
+        # 切片线（亮蓝色，1px）
+        line_pen = QPen(QColor(0x38, 0x4A, 0xFF))
+        line_pen.setCosmetic(True)
+        painter.setPen(line_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        x_step = slice_w + self.x_gap
+        for i in range(self.x_count):
+            for offset in (x_step * i, x_step * i + slice_w):
+                x = rect.left() + offset * scale_x
+                painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+
+        y_step = slice_h + self.y_gap
+        for i in range(self.y_count):
+            for offset in (y_step * i, y_step * i + slice_h):
+                y = rect.top() + offset * scale_y
+                painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+
+    def _paint_handles(self, painter):
+
+        radius = 5
+        painter.setPen(QPen(QColor(0x3B, 0x82, 0xF6), 2))
+        painter.setBrush(QBrush(QColor(255, 255, 255)))
+        for _, _, point in self._handles():
+            painter.drawRect(QRectF(
+                point.x() - radius, point.y() - radius, radius * 2, radius * 2
+            ))
+
+    def _paint_hint(self, painter):
+        """在预览窗最下边绘制白色操作提示。"""
+
+        text = ("拖动四角锚点：缩放 / 拖动四边锚点：旋转 / 左键拖动：移动图片位置 / "
+                "鼠标滚轮：缩放查看 / 右键拖动：移动查看范围")
+
+        margin = 8
+        width = max(1, self.width() - margin * 2)
+        flags = int(Qt.AlignmentFlag.AlignCenter) | int(Qt.TextFlag.TextWordWrap)
+
+        bounds = painter.fontMetrics().boundingRect(
+            0, 0, width, 10000, int(Qt.TextFlag.TextWordWrap), text
+        )
+        bar = QRectF(
+            margin, self.height() - bounds.height() - margin - 6,
+            width, bounds.height() + 6,
+        )
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 140)))
+        painter.drawRoundedRect(bar, 8, 8)
+
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(bar, flags, text)
+
+    # --------------------------------------------------------
+    # 交互
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _distance(a: QPointF, b: QPointF) -> float:
+        return math.hypot(a.x() - b.x(), a.y() - b.y())
+
+    def _handle_at(self, pos: QPointF):
+        for kind, index, point in self._handles():
+            if self._distance(pos, point) <= 9:
+                return kind, index
+        return None
+
+    def mousePressEvent(self, event):
+
+        # 右键拖动：仅平移查看范围，不影响图片在导出图中的位置
+        if event.button() == Qt.MouseButton.RightButton:
+            self._panning = True
+            self._pan_start = event.position()
+            self._pan_start_view = QPointF(self.view_pan)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        pos = event.position()
+        self._drag_start = pos
+        hit = self._handle_at(pos)
+
+        if hit is not None:
+            kind, index = hit
+            if kind == "corner":
+                self._drag_mode = "corner"
+                corners = self._corner_points_scene()
+                self._anchor = corners[(index + 2) % 4]     # 对角作为缩放锚点
+                self._start_scale = self.image_scale
+                self._start_center = QPointF(self.image_center)
+                self._start_dist = max(
+                    1e-6, self._distance(self._anchor, self.widget_to_scene(pos))
+                )
+            else:
+                self._drag_mode = "rotate"
+                self._start_angle = self.image_angle
+                center_w = self.scene_to_widget(self.image_center)
+                self._start_mouse_angle = math.degrees(
+                    math.atan2(pos.y() - center_w.y(), pos.x() - center_w.x())
+                )
+            return
+
+        if self._image_contains_scene(self.widget_to_scene(pos)):
+            self._drag_mode = "move"
+            self._start_center = QPointF(self.image_center)
+        else:
+            self._drag_mode = None
+
+    def mouseMoveEvent(self, event):
+
+        pos = event.position()
+
+        if self._panning:
+            self.view_pan = QPointF(
+                self._pan_start_view.x() + (pos.x() - self._pan_start.x()),
+                self._pan_start_view.y() + (pos.y() - self._pan_start.y()),
+            )
+            self.update()
+            return
+
+        if self._drag_mode is None:
+            self._update_cursor(pos)
+            return
+
+        if self._drag_mode == "corner":
+            scene = self.widget_to_scene(pos)
+            ratio = max(0.02, self._distance(self._anchor, scene) / self._start_dist)
+            self.image_scale = self._start_scale * ratio
+            # 保持对角锚点固定
+            self.image_center = QPointF(
+                self._anchor.x() + (self._start_center.x() - self._anchor.x()) * ratio,
+                self._anchor.y() + (self._start_center.y() - self._anchor.y()) * ratio,
+            )
+
+        elif self._drag_mode == "rotate":
+            center_w = self.scene_to_widget(self.image_center)
+            angle = math.degrees(
+                math.atan2(pos.y() - center_w.y(), pos.x() - center_w.x())
+            )
+            self.image_angle = self._start_angle + (angle - self._start_mouse_angle)
+
+        elif self._drag_mode == "move":
+            scale = self.view_scale
+            self.image_center = QPointF(
+                self._start_center.x() + (pos.x() - self._drag_start.x()) / scale,
+                self._start_center.y() + (pos.y() - self._drag_start.y()) / scale,
+            )
+
+        self._refresh_coverage()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+
+        if event.button() == Qt.MouseButton.RightButton and self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+
+        self._drag_mode = None
+
+    def _update_cursor(self, pos):
+        hit = self._handle_at(pos)
+        if hit is None:
+            inside = self._image_contains_scene(self.widget_to_scene(pos))
+            self.setCursor(
+                Qt.CursorShape.SizeAllCursor if inside
+                else Qt.CursorShape.ArrowCursor
+            )
+        elif hit[0] == "corner":
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        else:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def wheelEvent(self, event):
+
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+
+        # 以鼠标所在位置为中心缩放：缩放前后鼠标下的场景点保持在鼠标下
+        mouse = event.position()
+        scene_point = self.widget_to_scene(mouse)
+        factor = 1.1 if delta > 0 else 1 / 1.1
+        self.view_scale = max(0.01, min(60.0, self.view_scale * factor))
+
+        center = self.export_rect.center()
+        self.view_pan = QPointF(
+            mouse.x() - self.width() / 2
+            - (scene_point.x() - center.x()) * self.view_scale,
+            mouse.y() - self.height() / 2
+            - (scene_point.y() - center.y()) * self.view_scale,
+        )
+        self.update()
+        event.accept()
+
+    # --------------------------------------------------------
+    # 导出渲染
+    # --------------------------------------------------------
+
+    def render_export(self) -> QImage:
+        """把导出区域内的画面按输出分辨率渲染为 QImage。"""
+
+        width = max(1, int(self.out_w))
+        height = max(1, int(self.out_h))
+        canvas = QImage(width, height, QImage.Format.Format_RGB888)
+        canvas.fill(QColor(0, 0, 0))
+
+        rect = self.export_rect
+        if rect.width() <= 0 or rect.height() <= 0:
+            return canvas
+
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        scale_x = width / rect.width()
+        scale_y = height / rect.height()
+        painter.translate(-rect.left() * scale_x, -rect.top() * scale_y)
+        painter.scale(scale_x, scale_y)
+
+        self._draw_image(painter)
+
+        painter.end()
+        return canvas
+
+
+class SingleExportDialog(QDialog):
+    """
+    单张图片「图片调整导出」的配置弹窗。
+
+    尺寸与主窗口一致，分为左右两块：
+        左：预览窗（ImageEditView），可视化缩放 / 旋转 / 移动图片；
+        右：编辑窗，包含 分辨率 / 切片 / 目标格式 / 文件大小 / 输出文件。
+    """
+
+    def __init__(self, image: QImage, source_stem, folder=None, parent=None):
+
+        super().__init__(parent)
+
+        self.source_size = (image.width(), image.height())
+        self.source_stem = source_stem
+        self.folder = Path(folder) if folder else Path.home()
+        self.initial_folder = self.folder
+        self.options = None
+        self._syncing = False
+        self._name_edited = False
+
+        self.setWindowTitle("图片调整导出")
+
+        # 标题栏增加最小化 / 最大化（全屏）按钮
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+
+        self.preview = ImageEditView(image, image.width(), image.height())
+
+        editor = QWidget()
+        editor.setObjectName("Editor")
+        editor_layout = QVBoxLayout(editor)
+        editor_layout.setContentsMargins(18, 18, 18, 16)
+        editor_layout.setSpacing(16)
+
+        editor_layout.addWidget(self._build_resolution_row())
+        editor_layout.addWidget(self._build_slice_row())
+        editor_layout.addWidget(self._build_format_row())
+        editor_layout.addWidget(self._build_size_row())
+        editor_layout.addWidget(self._build_output_row())
+        editor_layout.addStretch(1)
+
+        # 原图未完全覆盖输出图时的红字提示（位于开始导出按钮上一行）
+        self.cover_warning = QLabel("原图未完全覆盖输出图")
+        self.cover_warning.setObjectName("Warning")
+        self.cover_warning.setVisible(not self.preview.is_covered())
+        editor_layout.addWidget(self.cover_warning)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+
+        # 开始导出 / 还原为初始 / 取消，均不绑定 Enter
+        ok_button = QPushButton("开始导出")
+        set_button_role(ok_button, "primary")
+        ok_button.setMinimumWidth(96)
+        ok_button.setAutoDefault(False)
+        ok_button.setDefault(False)
+        ok_button.clicked.connect(self.accept)
+        button_row.addWidget(ok_button)
+
+        self.reset_button = QPushButton("还原为初始")
+        self.reset_button.setMinimumWidth(96)
+        self.reset_button.setAutoDefault(False)
+        self.reset_button.setDefault(False)
+        self.reset_button.clicked.connect(self.reset_all)
+        button_row.addWidget(self.reset_button)
+
+        cancel_button = QPushButton("取消")
+        cancel_button.setMinimumWidth(80)
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
+        cancel_button.clicked.connect(self.reject)
+        button_row.addWidget(cancel_button)
+
+        editor_layout.addLayout(button_row)
+
+        self.preview.coverageChanged.connect(self.on_coverage_changed)
+
+        editor.setFixedWidth(380)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.preview, 1)
+        root.addWidget(editor, 0)
+
+        # 格式变化时更新后缀并刷新默认文件名
+        self.jpg_radio.toggled.connect(self.on_format_changed)
+        self.png_radio.toggled.connect(self.on_format_changed)
+
+        self.refresh_output_name()
+
+        if parent is not None:
+            self.resize(parent.size())
+
+    # --------------------------------------------------------
+    # 界面构建
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _title(text):
+        """生成加粗的配置项标题标签。"""
+
+        label = QLabel(text)
+        label.setObjectName("Title")
+        return label
+
     def _build_resolution_row(self):
-        """构建「分辨率」标题行与宽高输入行（含等比锁定与缩放方式选择）。"""
+        """构建「分辨率」标题行与宽高输入行（含等比锁定）。"""
 
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -1447,14 +2298,6 @@ class ConversionDialog(QDialog):
         layout.setSpacing(6)
         layout.addWidget(self._title("分辨率"))
 
-        # 多张图片：保留标题行，仅在内容处提示不可用
-        if self.count != 1:
-            hint = QLabel("调整分辨率仅在选中1张图时可用")
-            hint.setObjectName("Hint")
-            layout.addWidget(hint)
-            return box
-
-        # 宽 / 等比锁定 / 高
         row = QHBoxLayout()
         row.setSpacing(10)
         row.addWidget(QLabel("宽"))
@@ -1474,29 +2317,92 @@ class ConversionDialog(QDialog):
         row.addStretch(1)
         layout.addLayout(row)
 
-        # 不等比缩放的处理方式（仅在取消等比后出现）
-        self.mode_box = QWidget()
-        mode_layout = QHBoxLayout(self.mode_box)
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(16)
-        mode_layout.addWidget(QLabel("缩放方式"))
-
-        self.mode_group = QButtonGroup(self)
-        for index, (value, text) in enumerate(RESIZE_MODES):
-            radio = QRadioButton(text)
-            radio.setProperty("mode", value)
-            if index == 0:
-                radio.setChecked(True)    # 默认黑边填充
-            self.mode_group.addButton(radio)
-            mode_layout.addWidget(radio)
-
-        mode_layout.addStretch(1)
-        layout.addWidget(self.mode_box)
-        self.mode_box.setVisible(False)
+        hint = QLabel("取消等比后可分别设置宽高，左侧导出区域会同步改变长宽比。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         self.lock_check.toggled.connect(self.on_lock_toggled)
         self.width_edit.textEdited.connect(self.on_width_edited)
         self.height_edit.textEdited.connect(self.on_height_edited)
+
+        return box
+
+    def _build_slice_row(self):
+        """构建「切片」标题行与 X / Y 数量、间隔输入行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title("切片"))
+
+        x_row = QHBoxLayout()
+        x_row.setSpacing(8)
+        x_row.addWidget(QLabel("X数量"))
+        self.x_count_edit = QLineEdit("1")
+        self.x_count_edit.setFixedWidth(70)
+        self.x_count_edit.setValidator(QIntValidator(1, 99999, self))
+        x_row.addWidget(self.x_count_edit)
+        x_row.addWidget(QLabel("X间隔"))
+        self.x_gap_edit = QLineEdit("0")
+        self.x_gap_edit.setFixedWidth(70)
+        self.x_gap_edit.setValidator(QIntValidator(0, 99999, self))
+        x_row.addWidget(self.x_gap_edit)
+        x_row.addWidget(QLabel("px"))
+        x_row.addStretch(1)
+        layout.addLayout(x_row)
+
+        y_row = QHBoxLayout()
+        y_row.setSpacing(8)
+        y_row.addWidget(QLabel("Y数量"))
+        self.y_count_edit = QLineEdit("1")
+        self.y_count_edit.setFixedWidth(70)
+        self.y_count_edit.setValidator(QIntValidator(1, 99999, self))
+        y_row.addWidget(self.y_count_edit)
+        y_row.addWidget(QLabel("Y间隔"))
+        self.y_gap_edit = QLineEdit("0")
+        self.y_gap_edit.setFixedWidth(70)
+        self.y_gap_edit.setValidator(QIntValidator(0, 99999, self))
+        y_row.addWidget(self.y_gap_edit)
+        y_row.addWidget(QLabel("px"))
+        y_row.addStretch(1)
+        layout.addLayout(y_row)
+
+        hint = QLabel("数量≥1，间隔≥0（单位：px）；默认 1×1 即不切分。")
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        for edit in (self.x_count_edit, self.x_gap_edit,
+                     self.y_count_edit, self.y_gap_edit):
+            edit.textChanged.connect(self._refresh_slices)
+
+        return box
+
+    def _build_format_row(self):
+        """构建「目标格式」标题行与 jpg / png 单选行。"""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title("目标格式"))
+
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        self.jpg_radio = QRadioButton("jpg")
+        self.png_radio = QRadioButton("png")
+        self.jpg_radio.setChecked(True)   # 默认 jpg
+
+        self.format_group = QButtonGroup(self)
+        self.format_group.addButton(self.jpg_radio)
+        self.format_group.addButton(self.png_radio)
+
+        row.addWidget(self.jpg_radio)
+        row.addWidget(self.png_radio)
+        row.addStretch(1)
+        layout.addLayout(row)
 
         return box
 
@@ -1536,7 +2442,6 @@ class ConversionDialog(QDialog):
         layout.setSpacing(6)
         layout.addWidget(self._title("输出文件"))
 
-        # 文件夹：点击路径弹出选择窗口（默认当前所在文件夹）
         folder_row = QHBoxLayout()
         folder_row.setSpacing(10)
         folder_row.addWidget(QLabel("文件夹"))
@@ -1547,24 +2452,26 @@ class ConversionDialog(QDialog):
         folder_row.addWidget(self.folder_button, 1)
         layout.addLayout(folder_row)
 
-        # 文件名：仅单张图片可修改，后缀跟随目标格式且不可编辑
-        if self.count == 1:
-            name_row = QHBoxLayout()
-            name_row.setSpacing(10)
-            name_row.addWidget(QLabel("文件名"))
-            self.name_edit = QLineEdit()
-            self.name_edit.setPlaceholderText("文件名（不含后缀）")
-            name_row.addWidget(self.name_edit, 1)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(10)
+        name_row.addWidget(QLabel("文件名"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("文件名（不含后缀）")
+        name_row.addWidget(self.name_edit, 1)
 
-            self.suffix_label = QLabel(self.current_ext())
-            self.suffix_label.setObjectName("Hint")
-            self.suffix_label.setToolTip("后缀跟随目标格式，不可修改")
-            name_row.addWidget(self.suffix_label)
-            layout.addLayout(name_row)
+        self.suffix_label = QLabel(self.current_ext())
+        self.suffix_label.setObjectName("Hint")
+        self.suffix_label.setToolTip("后缀跟随目标格式，不可修改")
+        name_row.addWidget(self.suffix_label)
+        layout.addLayout(name_row)
 
-            self.name_edit.textEdited.connect(self.on_name_edited)
+        self.name_edit.textEdited.connect(self.on_name_edited)
 
         return box
+
+    # --------------------------------------------------------
+    # 交互 / 联动
+    # --------------------------------------------------------
 
     def current_ext(self):
         """返回当前目标格式对应的文件后缀。"""
@@ -1575,10 +2482,10 @@ class ConversionDialog(QDialog):
         """
         重新计算默认文件名：{原文件名 + 冲突序号} + 后缀。
 
-        仅在单张图片、且用户尚未手动修改过文件名时生效。
+        仅在用户尚未手动修改过文件名时生效。
         """
 
-        if self.count != 1 or self._name_edited:
+        if self._name_edited:
             return
 
         stem = unique_stem(self.folder, self.source_stem, self.current_ext())
@@ -1600,9 +2507,6 @@ class ConversionDialog(QDialog):
     def on_format_changed(self, checked=False):
         """切换目标格式时更新后缀显示，并刷新默认文件名。"""
 
-        if not hasattr(self, "suffix_label"):
-            return
-
         self.suffix_label.setText(self.current_ext())
         self.refresh_output_name()
 
@@ -1611,28 +2515,27 @@ class ConversionDialog(QDialog):
 
         self._name_edited = True
 
-    # --------------------------------------------------------
-    # 交互
-    # --------------------------------------------------------
-
     def on_lock_toggled(self, checked):
-        """等比锁定开关：取消等比时显示不等比缩放的处理方式选择行。"""
+        """等比锁定：勾选时按原图比例同步高度。"""
 
-        self.mode_box.setVisible(not checked)
+        if checked:
+            self._sync_other(self.width_edit.text(), self.height_edit,
+                             width_to_height=True)
+        self._refresh_output_size()
 
     def on_width_edited(self, text):
-        """编辑宽度时，若处于等比锁定则同步修改高度。"""
+        """编辑宽度：等比时同步高度，随后刷新导出区域长宽比。"""
 
-        if self._syncing or not self.lock_check.isChecked():
-            return
-        self._sync_other(text, self.height_edit, width_to_height=True)
+        if not self._syncing and self.lock_check.isChecked():
+            self._sync_other(text, self.height_edit, width_to_height=True)
+        self._refresh_output_size()
 
     def on_height_edited(self, text):
-        """编辑高度时，若处于等比锁定则同步修改宽度。"""
+        """编辑高度：等比时同步宽度，随后刷新导出区域长宽比。"""
 
-        if self._syncing or not self.lock_check.isChecked():
-            return
-        self._sync_other(text, self.width_edit, width_to_height=False)
+        if not self._syncing and self.lock_check.isChecked():
+            self._sync_other(text, self.width_edit, width_to_height=False)
+        self._refresh_output_size()
 
     def _sync_other(self, text, other, width_to_height):
         """按原始宽高比把另一输入框同步为等比值。"""
@@ -1653,12 +2556,89 @@ class ConversionDialog(QDialog):
             other.setText(str(max(1, round(value * src_w / src_h))))
         self._syncing = False
 
+    def _refresh_output_size(self):
+        """把当前宽高同步给预览窗，用于调整导出区域的长宽比。"""
+
+        try:
+            width = int(self.width_edit.text())
+            height = int(self.height_edit.text())
+        except ValueError:
+            return
+
+        if width <= 0 or height <= 0:
+            return
+
+        self.preview.set_output_size(width, height)
+
+    @staticmethod
+    def _read_int(edit, default):
+        """读取输入框中的整数，无法解析时返回默认值。"""
+
+        try:
+            return int(edit.text())
+        except ValueError:
+            return default
+
+    def _refresh_slices(self):
+        """把切片参数同步给预览窗以绘制切片线与间隔遮罩。"""
+
+        self.preview.set_slices(
+            self._read_int(self.x_count_edit, 1),
+            self._read_int(self.x_gap_edit, 0),
+            self._read_int(self.y_count_edit, 1),
+            self._read_int(self.y_gap_edit, 0),
+        )
+
+    def on_coverage_changed(self, covered):
+        """覆盖状态变化时，切换红字提示的显示。"""
+
+        self.cover_warning.setVisible(not covered)
+
+    def reset_all(self):
+        """确认后撤销所有修改，恢复到刚导入、尚未编辑的状态。"""
+
+        box = QMessageBox(self)
+        box.setWindowTitle("提示")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText("是否确定要还原？还原后丢失所有修改内容。")
+        btn_yes = box.addButton("还原", QMessageBox.ButtonRole.YesRole)
+        box.addButton("取消", QMessageBox.ButtonRole.NoRole)
+        set_button_role(btn_yes, "primary")
+        box.setDefaultButton(btn_yes)
+        box.exec()
+
+        if box.clickedButton() is not btn_yes:
+            return
+
+        # 预览窗：撤销缩放 / 旋转 / 平移与导出区域、切分
+        self.preview.reset()
+
+        # 编辑窗：恢复各项输入
+        self.width_edit.setText(str(self.source_size[0]))
+        self.height_edit.setText(str(self.source_size[1]))
+        self.lock_check.setChecked(True)
+        self.x_count_edit.setText("1")
+        self.x_gap_edit.setText("0")
+        self.y_count_edit.setText("1")
+        self.y_gap_edit.setText("0")
+        self.jpg_radio.setChecked(True)
+        self.suffix_label.setText(self.current_ext())
+        self.size_edit.clear()
+        self.folder = self.initial_folder
+        self.folder_button.setText(str(self.folder))
+
+        self._name_edited = False
+        self.refresh_output_name()
+
+        self._refresh_output_size()
+        self._refresh_slices()
+
     # --------------------------------------------------------
     # 收集配置
     # --------------------------------------------------------
 
     def accept(self):
-        """校验输入并收集配置写入 self.options，然后关闭窗口。"""
+        """校验输入、渲染导出画面并收集配置，然后关闭窗口。"""
 
         options = {}
 
@@ -1666,35 +2646,44 @@ class ConversionDialog(QDialog):
         options["format"] = "JPEG" if self.jpg_radio.isChecked() else "PNG"
         options["ext"] = ".jpg" if options["format"] == "JPEG" else ".png"
 
-        # 分辨率（仅单张图片可调）
-        options["resize_size"] = None
-        options["resize_mode"] = "stretch"
+        # 分辨率
+        try:
+            width = int(self.width_edit.text())
+            height = int(self.height_edit.text())
+        except ValueError:
+            QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
+            return
 
-        if self.count == 1:
-            try:
-                width = int(self.width_edit.text())
-                height = int(self.height_edit.text())
-            except ValueError:
-                QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
-                return
+        if width <= 0 or height <= 0:
+            QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
+            return
 
-            if width <= 0 or height <= 0:
-                QMessageBox.warning(self, "提示", "分辨率请输入正整数。")
-                return
+        # 切片
+        x_count = self._read_int(self.x_count_edit, 1)
+        x_gap = self._read_int(self.x_gap_edit, 0)
+        y_count = self._read_int(self.y_count_edit, 1)
+        y_gap = self._read_int(self.y_gap_edit, 0)
 
-            options["resize_size"] = (width, height)
-            if not self.lock_check.isChecked():
-                options["resize_mode"] = (
-                    self.mode_group.checkedButton().property("mode")
-                )
+        if x_count < 1 or y_count < 1 or x_gap < 0 or y_gap < 0:
+            QMessageBox.warning(self, "提示", "切片数量需≥1，间隔需≥0。")
+            return
+
+        slice_w = (width - (x_count - 1) * x_gap) / x_count
+        slice_h = (height - (y_count - 1) * y_gap) / y_count
+
+        if slice_w < 1 or slice_h < 1:
+            QMessageBox.warning(
+                self, "提示", "切片间隔过大，单张尺寸不足 1px，请减小间隔或数量。"
+            )
+            return
 
         # 文件大小
         options["max_bytes"] = None
-        text = self.size_edit.text().strip()
+        size_text = self.size_edit.text().strip()
 
-        if text:
+        if size_text:
             try:
-                megabytes = float(text)
+                megabytes = float(size_text)
             except ValueError:
                 QMessageBox.warning(self, "提示", "文件大小请输入数字（MB）。")
                 return
@@ -1706,20 +2695,41 @@ class ConversionDialog(QDialog):
             options["max_bytes"] = int(megabytes * 1024 * 1024)
 
         # 输出文件
-        options["output_dir"] = str(self.folder)
-        options["output_stem"] = None
+        stem = self.name_edit.text().strip()
+        if not stem:
+            QMessageBox.warning(self, "提示", "请输入文件名。")
+            return
+        if any(ch in stem for ch in '\\/:*?"<>|'):
+            QMessageBox.warning(
+                self, "提示", '文件名不能包含 \\ / : * ? " < > | 字符。'
+            )
+            return
 
-        if self.count == 1:
-            stem = self.name_edit.text().strip()
-            if not stem:
-                QMessageBox.warning(self, "提示", "请输入文件名。")
+        # 原图未完全覆盖输出图时，导出前额外确认
+        if not self.preview.is_covered():
+            box = QMessageBox(self)
+            box.setWindowTitle("提示")
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(
+                "原图未完全覆盖输出图。\n"
+                "未覆盖区域将以黑色填充，是否仍要导出？"
+            )
+            btn_ok = box.addButton("仍然导出", QMessageBox.ButtonRole.YesRole)
+            box.addButton("取消", QMessageBox.ButtonRole.NoRole)
+            set_button_role(btn_ok, "primary")
+            box.setDefaultButton(btn_ok)
+            box.exec()
+            if box.clickedButton() is not btn_ok:
                 return
-            if any(ch in stem for ch in '\\/:*?"<>|'):
-                QMessageBox.warning(
-                    self, "提示", '文件名不能包含 \\ / : * ? " < > | 字符。'
-                )
-                return
-            options["output_stem"] = stem
+
+        # 渲染导出画面
+        self.preview.set_output_size(width, height)
+        image = self.preview.render_export()
+
+        options["output_dir"] = str(self.folder)
+        options["output_stem"] = stem
+        options["image"] = image
+        options["slices"] = (x_count, x_gap, y_count, y_gap)
 
         self.options = options
         super().accept()
@@ -1743,9 +2753,6 @@ class MainWindow(QMainWindow):
         self.loader = None
         self.hq_thread = None
         self.hq_loader = None
-
-        # 是否开启「降低内存占用模式」：开启时网格预览按最长边上限降采样读取
-        self.reduce_memory = True
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1808,7 +2815,7 @@ class MainWindow(QMainWindow):
             ("移动到指定文件夹 (Ctrl+X)", self.move_to_folder, None),
             ("移动到回收站 (Del / Backspace)", self.move_to_recycle_bin, "danger"),
             ("导出拼接缩略图 (Ctrl+S)", self.stitch_selected, None),
-            ("格式大小分辨率转换", self.convert_format_size_resolution, "primary"),
+            ("图片调整导出 (Ctrl+Shift+S)", self.image_adjust_export, "primary"),
         ):
             button = QPushButton(text)
             if role:
@@ -1817,14 +2824,6 @@ class MainWindow(QMainWindow):
             second.addWidget(button)
 
         second.addStretch(1)
-
-        self.reduce_memory_check = QCheckBox("降低内存占用模式")
-        self.reduce_memory_check.setChecked(True)
-        self.reduce_memory_check.setToolTip(
-            "勾选此选项将降低内存占用，但会降低读取速度"
-        )
-        self.reduce_memory_check.toggled.connect(self.on_reduce_memory_toggled)
-        second.addWidget(self.reduce_memory_check)
 
         panel_layout.addLayout(second)
 
@@ -1862,6 +2861,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+A", self.select_all, self),
             ("Esc", self.deselect_all, self),
             ("Ctrl+S", self.stitch_selected, self),
+            ("Ctrl+Shift+S", self.image_adjust_export, self),
             ("Ctrl+C", self.copy_to_folder, self),
             ("Ctrl+X", self.move_to_folder, self),
             ("Del", self.move_to_recycle_bin, self.view),
@@ -1920,23 +2920,6 @@ class MainWindow(QMainWindow):
 
         gc.collect()
 
-    def on_reduce_memory_toggled(self, checked):
-        """
-        切换「降低内存占用模式」。
-
-        缓存中图片的质量随该开关变化，故清空预览缓存后按新模式重新读取。
-        """
-
-        self.reduce_memory = checked
-
-        self.stop_loader()
-        self.view.images.clear()
-        self.view.hq_images.clear()
-        self.view.hq_failed.clear()
-        self.view.viewport().update()
-
-        self.ensure_visible_loaded(*self.view.visible_range())
-
     def _run_loader(self, loader, thread, on_loaded, on_failed, on_finished):
         """把 loader 放到独立线程中运行并连接信号。"""
 
@@ -1968,11 +2951,8 @@ class MainWindow(QMainWindow):
         if not missing or self.loader_thread is not None:
             return
 
-        # 降内存模式下，网格预览按最长边上限降采样读取
-        max_edge = preview_max_edge() if self.reduce_memory else None
-
         self.loader_thread = QThread(self)
-        self.loader = ImageLoader(max_edge=max_edge)
+        self.loader = ImageLoader(max_edge=PREVIEW_MAX_EDGE)
         self.loader.set_queue(missing)
 
         self._run_loader(
@@ -2010,12 +2990,10 @@ class MainWindow(QMainWindow):
         needed = []
         for i in range(first_row, last_row + 1):
             path = self.view.paths[i]
+            # 网格预览一律是降采样图，单图模式需重新完整读取
             if i in self.view.hq_images or i in self.view.hq_failed:
                 continue
-            # RAW 的网格预览只是缩略图/半尺寸；普通图片在降内存模式下
-            # 预览已被降采样，二者在单图模式都需要重新完整读取。
-            if Path(path).suffix.lower() in RAW_EXTS or self.reduce_memory:
-                needed.append((i, path))
+            needed.append((i, path))
 
         if not needed or self.hq_thread is not None:
             return
@@ -2278,15 +3256,15 @@ class MainWindow(QMainWindow):
         )
 
     # --------------------------------------------------------
-    # 格式 / 大小 / 分辨率转换
+    # 图片调整导出
     # --------------------------------------------------------
 
-    def convert_format_size_resolution(self):
+    def image_adjust_export(self):
         """
-        弹出配置窗口，把选中的一组图片按格式 / 分辨率 / 文件大小进行转换。
+        「图片调整导出」入口：按选中数量分流。
 
-        单张图片时预先读取原图，用于在弹窗中显示原始分辨率，并在转换时复用；
-        转换结果写到弹窗中选择的输出文件夹（默认当前文件夹），同名文件自动避让。
+        仅选中 1 张：弹出可视化编辑弹窗（可缩放 / 旋转 / 移动 / 切片）；
+        选中多张：弹出批量导出弹窗（按长边像素等比缩放）。
         """
 
         if self.folder is None:
@@ -2299,30 +3277,110 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "没有匹配到任何文件。")
             return
 
-        # 单张图片：预先读取完整图像，供弹窗显示原始宽高并在转换时复用
-        source_image = None
-        source_size = None
-        source_stem = None
-
         if len(indices) == 1:
-            path = self.view.paths[indices[0]]
-            source_stem = Path(path).stem
-            try:
-                source_image = load_source_image(path)
-                source_size = source_image.size
-            except Exception as e:
-                QMessageBox.warning(self, "提示", f"读取图片失败：\n{e}")
-                return
+            self._export_single(indices[0])
+        else:
+            self._export_batch(indices)
 
-        dialog = ConversionDialog(
-            len(indices), source_size, source_stem, self.folder, self
-        )
+    def _export_single(self, index):
+        """单张图片：可视化编辑后按需切片导出。"""
+
+        path = self.view.paths[index]
+        source_stem = Path(path).stem
+
+        try:
+            image = load_image(path, full=True)
+        except Exception as e:
+            QMessageBox.warning(self, "提示", f"读取图片失败：\n{e}")
+            return
+
+        dialog = SingleExportDialog(image, source_stem, self.folder, self)
 
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.options is None:
             return
 
         options = dialog.options
 
+        x_count, x_gap, y_count, y_gap = options["slices"]
+        export = options["image"]
+        res_w, res_h = export.width(), export.height()
+
+        slice_w = (res_w - (x_count - 1) * x_gap) / x_count
+        slice_h = (res_h - (y_count - 1) * y_gap) / y_count
+        sliced = x_count != 1 or y_count != 1
+
+        # 发生切分时，自动导出到以原图名命名的新文件夹（重名追加 (x)）
+        target_dir = Path(options["output_dir"])
+        if sliced:
+            target_dir = unique_folder(target_dir, source_stem)
+            target_dir.mkdir(parents=True, exist_ok=False)
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        count = 0
+        failed = []
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
+        try:
+            for row in range(y_count):
+                for col in range(x_count):
+
+                    left = max(0, min(res_w - 1, round((slice_w + x_gap) * col)))
+                    top = max(0, min(res_h - 1, round((slice_h + y_gap) * row)))
+                    right = min(res_w, round(left + slice_w))
+                    bottom = min(res_h, round(top + slice_h))
+
+                    if right <= left or bottom <= top:
+                        continue
+
+                    piece = export.copy(QRect(left, top, right - left, bottom - top))
+                    pil_image = qimage_to_pil(piece)
+
+                    base = (
+                        f"{options['output_stem']}_slice_{row * x_count + col}"
+                        if sliced else options["output_stem"]
+                    )
+                    stem = unique_stem(target_dir, base, options["ext"])
+                    target = target_dir / f"{stem}{options['ext']}"
+
+                    try:
+                        data, quality = encode_with_limit(
+                            pil_image, options["format"], options["max_bytes"]
+                        )
+                        with open(target, "wb") as f:
+                            f.write(data)
+                        count += 1
+                        note = f"，品质 {quality}" if quality else ""
+                        print(
+                            f"[导出] {target.name}  {len(data) / 1024:.0f} KB{note}",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        failed.append((target.name, str(e)))
+                        print(f"[导出失败] {target.name}: {e}", flush=True)
+
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        message = f"已导出 {count} 张图片到：\n{target_dir}"
+        if failed:
+            message += "\n\n以下文件失败：\n" + "\n".join(
+                f"{name}：{error}" for name, error in failed[:10]
+            )
+
+        QMessageBox.information(self, "导出完成", message)
+        self.statusBar().showMessage(f"导出完成：{count} 张 -> {target_dir.name}")
+
+    def _export_batch(self, indices):
+        """多张图片：按长边像素等比缩放导出。"""
+
+        dialog = BatchExportDialog(len(indices), self.folder, self)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.options is None:
+            return
+
+        options = dialog.options
         target_dir = Path(options["output_dir"])
         target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2335,48 +3393,39 @@ class MainWindow(QMainWindow):
             for position, index in enumerate(indices, 1):
 
                 path = self.view.paths[index]
-                print(f"[转换] {position}/{len(indices)}  {Path(path).name}", flush=True)
-
-                # 单张图片复用已读取的图像
-                reused = source_image if len(indices) == 1 else None
+                print(f"[导出] {position}/{len(indices)}  {Path(path).name}", flush=True)
 
                 try:
-                    output, size, quality = convert_one_image(
+                    output, size, quality = convert_batch_image(
                         path,
                         target_dir,
                         options["format"],
                         options["ext"],
-                        options["resize_size"],
-                        options["resize_mode"],
+                        options["long_edge"],
                         options["max_bytes"],
-                        output_stem=options["output_stem"],
-                        source_image=reused,
                     )
                     count += 1
                     note = f"，品质 {quality}" if quality else ""
                     print(
-                        f"[转换完成] {output.name}  {size / 1024:.0f} KB{note}",
+                        f"[导出完成] {output.name}  {size / 1024:.0f} KB{note}",
                         flush=True,
                     )
 
                 except Exception as e:
                     failed.append((Path(path).name, str(e)))
-                    print(f"[转换失败] {Path(path).name}: {e}", flush=True)
+                    print(f"[导出失败] {Path(path).name}: {e}", flush=True)
 
         finally:
             QApplication.restoreOverrideCursor()
 
-        message = f"已转换 {count} 张图片到：\n{target_dir}"
-
+        message = f"已导出 {count} 张图片到：\n{target_dir}"
         if failed:
             message += "\n\n以下文件失败：\n" + "\n".join(
                 f"{name}：{error}" for name, error in failed[:10]
             )
 
-        QMessageBox.information(self, "转换完成", message)
-        self.statusBar().showMessage(
-            f"转换完成：{count} 张 -> {target_dir.name}"
-        )
+        QMessageBox.information(self, "导出完成", message)
+        self.statusBar().showMessage(f"导出完成：{count} 张 -> {target_dir.name}")
 
     # --------------------------------------------------------
     # 文件搬运
