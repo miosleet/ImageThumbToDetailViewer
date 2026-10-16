@@ -1,6 +1,6 @@
 # ImageThumbToDetailViewer (选片助手工作台)
 
-A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, exporting the selected images as a single image, and "Image Adjust Export" (export selected images by format / file size / resolution; a single image also supports scale / rotate / move / slice). Supports RAW.
+A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, exporting the selected images as a single image, and Image Adjust Export. Supports RAW.
 
 Built with **PySide6**.
 
