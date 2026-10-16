@@ -1,6 +1,6 @@
 # ImageThumbToDetailViewer (选片助手工作台)
 
-A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, exporting the selected images as a single image, and converting the selected images by format / file size / resolution. Supports RAW.
+A desktop tool for the photo-review workflow: thumbnail browsing, full-size viewing, and batch selection, plus batch copy / move of the selected images to a folder or the recycle bin, exporting the selected images as a single image, and "Image Adjust Export" (export selected images by format / file size / resolution; a single image also supports scale / rotate / move / slice). Supports RAW.
 
 Built with **PySide6**.
 
@@ -12,7 +12,7 @@ Built with **PySide6**.
 - **Open Folder (打开文件夹)**: lists every supported image in the folder (current folder only, no recursion into subfolders), sorted by file name.
 - **Thumbnail grid**: shows thumbnails as a grid. Virtualized rendering that only draws the visible tiles; images are loaded on demand in a background thread, so large folders won't freeze the UI.
 - **Zoom (Ctrl + wheel)**: steps through zoom levels, from a dense grid of about 10 columns up to single-image magnification (up to about 4x), and keeps the image under the cursor in the same spot after zooming.
-- **Full-quality single image**: in 1-image-per-row mode (including magnification), RAW files are re-decoded at full resolution in the background and swapped in, keeping the large view sharp;
+- **Full-quality single image**: in 1-image-per-row mode (including magnification) images are re-decoded at full resolution in the background and swapped in, keeping the large view sharp; grid previews are downscaled to a 1280 px long edge to reduce memory use.
 
 ### Selecting
 - **Click** anywhere on a tile: check / uncheck.
@@ -29,12 +29,13 @@ Built with **PySide6**.
 ### Export Stitched Thumbnails
 - **Export Stitched Thumbnails (Ctrl + S)**: stitches the selected images into one big image (total width 3840) using the current zoom level's column count; each cell is a thumbnail with its file name, and the height grows with the number of rows (a single column when magnified). Can be exported as PNG / JPEG.
 
-### Format / Size / Resolution Conversion
-- **Format Size Resolution Conversion**: converts the selected images to JPG / PNG and can adjust resolution and file size at the same time. Clicking it opens a settings dialog whose options are laid out as a "title row + content row":
-  - **Target format**: jpg / png, default jpg.
-  - **Resolution**: adjustable only when exactly 1 image is selected; the two inputs are pre-filled with that image's original width / height. A "等比" (keep aspect ratio) checkbox between width and height keeps the original aspect ratio in sync when either is edited; unchecking it reveals a "Resize mode" row — black bars / white bars / stretch / crop — for non-proportional scaling. With multiple images selected, only the title row is kept and the content shows "adjusting the resolution is only available when 1 image is selected".
-  - **File size**: an optional upper limit in MB; the output is made as large as possible while staying under that value (judged on the resized image): for JPG the quality is searched to approach the limit, while PNG is lossless so its size depends only on the resolution; leaving it blank exports at the highest quality without size conversion.
-  - **Output file**: choose the output folder (defaults to the current folder); clicking the folder path opens a folder picker. When exactly 1 image is selected the file name can be edited (the extension follows the target format and cannot be changed) and defaults to "{original name + conflict index}" — e.g. `aaa.png` to jpg becomes `aaa.jpg`, or `aaa(1).jpg` / `aaa(2).jpg` if those already exist. With multiple images only the folder can be chosen and the file name is hidden, using the same auto-avoid logic.
+### Image Adjust Export
+- **Image Adjust Export (Ctrl + Shift + S)**: opens a dialog that branches by selection count; both allow the target format (jpg / png), a file-size cap (MB, blank = highest quality) and the output folder.
+  - **Multiple images selected**: set "Max long edge (px)" — blank keeps the resolution, otherwise each image is scaled proportionally so its long edge equals the value. File names keep the originals and auto-avoid duplicates.
+  - **Exactly 1 image selected**: the dialog is the same size as the main window, with a preview pane on the left and an editor pane on the right.
+    - Preview pane: an "export region" defines the final image (normal inside, dimmed outside). Drag a corner handle to scale (keeping aspect), an edge handle to rotate, left-drag to move the image, the wheel to zoom around the cursor, right-drag to pan the view; slice lines (bright blue) and gap masks (black) are drawn in the export region, and any area not covered by the image is shown in red.
+    - Editor pane: resolution (uncheck the aspect lock to set width / height independently, which changes the export region's aspect ratio), slicing (X / Y count and gap in px, default 1×1 = no slicing), target format, file size, output file, and a "Reset to initial" button.
+    - Export: if the image does not fully cover the export region, the uncovered area is filled black and an extra confirmation is shown; when slicing, files go into a new subfolder named after the source image (with `(x)` on name collisions) and are named `_slice_n` (left→right, top→bottom).
 
 ---
 
@@ -50,6 +51,7 @@ Built with **PySide6**.
 | Ctrl + A | Select all |
 | Esc | Deselect all |
 | Ctrl + S | Export stitched thumbnails |
+| Ctrl + Shift + S | Image Adjust Export |
 | Ctrl + C | Copy to folder |
 | Ctrl + X | Move to folder |
 | Del / Backspace | Move to recycle bin (when the image view has focus) |
@@ -77,7 +79,7 @@ Built with **PySide6**.
 ### From source
 ```bash
 pip install PySide6 Pillow rawpy
-python ImageThumbToDetailViewer_v3.py
+python ImageThumbToDetailViewer_v3.1.py
 ```
 
 ### Prebuilt single-file exe

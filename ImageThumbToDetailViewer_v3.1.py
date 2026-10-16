@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-选片助手工作台（ImageThumbToDetailViewer v4）
+选片助手工作台（ImageThumbToDetailViewer v3.1）
 
 Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 Public License (CC BY-NC-SA 4.0)
@@ -25,7 +25,7 @@ Copyright (c) 2026 MioSleet(澪霰)
     3FR/ERF/KDC/MRW/RAW/RWL/X3F/IIQ/MOS/MEF/ARI
 
 运行：
-    python ImageThumbToDetailViewer_v4.py
+    python ImageThumbToDetailViewer_v3.1.py
 """
 
 import ctypes
