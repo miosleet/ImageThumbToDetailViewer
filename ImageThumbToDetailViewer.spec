@@ -6,8 +6,8 @@
     macOS  : python -m PyInstaller --noconfirm --clean ImageThumbToDetailViewer.spec
 
 产物：
-    Windows: dist/ImageThumbToDetailViewer_v3.1.exe（单文件，无控制台窗口）
-    macOS  : dist/ImageThumbToDetailViewer_v3.1.app（应用包，无控制台窗口）
+    Windows: dist/ImageThumbToDetailViewer_v3.2.exe（单文件，无控制台窗口）
+    macOS  : dist/ImageThumbToDetailViewer_v3.2.app（应用包，无控制台窗口）
 """
 
 import sys
@@ -24,8 +24,8 @@ ICON = 'Icon.icns' if sys.platform == 'darwin' else 'Icon.ico'
 
 
 a = Analysis(
-    ['ImageThumbToDetailViewer_v3.1.py'],
-    pathex=[],
+    ['MainCode/ImageThumbToDetailViewer_v3.2.py'],
+    pathex=['MainCode'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -44,7 +44,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ImageThumbToDetailViewer_v3.1',
+    name='ImageThumbToDetailViewer_v3.2',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -63,7 +63,7 @@ exe = EXE(
 if sys.platform == 'darwin':
     app = BUNDLE(
         exe,
-        name='ImageThumbToDetailViewer_v3.1.app',
+        name='ImageThumbToDetailViewer_v3.2.app',
         icon=ICON,
         bundle_identifier='com.miosleet.imagethumbtodetailviewer',
     )

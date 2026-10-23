@@ -81,11 +81,11 @@
 ### 源码运行
 ```bash
 pip install PySide6 Pillow rawpy
-python ImageThumbToDetailViewer_v3.1.py
+python MainCode/ImageThumbToDetailViewer_v3.2.py
 ```
 
 ### 已打包的单文件 exe
-直接双击 `dist/ImageThumbToDetailViewer.exe`。采用窗口模式打包，**不会出现控制台黑框**。
+直接双击 `dist/ImageThumbToDetailViewer_v3.2.exe`。采用窗口模式打包，**不会出现控制台黑框**。
 
 ---
 

@@ -79,11 +79,11 @@ Built with **PySide6**.
 ### From source
 ```bash
 pip install PySide6 Pillow rawpy
-python ImageThumbToDetailViewer_v3.1.py
+python MainCode/ImageThumbToDetailViewer_v3.2.py
 ```
 
 ### Prebuilt single-file exe
-Double-click `dist/ImageThumbToDetailViewer.exe`. It is built in windowed mode and **shows no console window**.
+Double-click `dist/ImageThumbToDetailViewer_v3.2.exe`. It is built in windowed mode and **shows no console window**.
 
 ---
 
