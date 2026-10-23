@@ -2807,8 +2807,9 @@ class MainWindow(QMainWindow):
 
     def open_folder(self):
 
+        start = self.folder if self.folder is not None else Path.home()
         folder = QFileDialog.getExistingDirectory(
-            self, "选择图片文件夹", str(Path.home())
+            self, "选择图片文件夹", str(start)
         )
         if folder:
             self.load_folder(Path(folder))
@@ -3450,8 +3451,9 @@ class MainWindow(QMainWindow):
 
         _, sources, verb = collected
 
+        start = self.folder if self.folder is not None else Path.home()
         target = QFileDialog.getExistingDirectory(
-            self, f"选择要{verb}到的文件夹", str(Path.home())
+            self, f"选择要{verb}到的文件夹", str(start)
         )
         if not target:
             return
