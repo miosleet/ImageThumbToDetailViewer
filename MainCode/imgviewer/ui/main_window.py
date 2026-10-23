@@ -12,7 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from ..constants import is_image_file
 from ..image_io import load_image
 from ..services import export_service, stitch_service, transfer_service
+from ..services.export_workers import BatchExportThread, StitchExportThread
 from ..services.loader_manager import LoaderManager
 from ..theme import set_button_role
 from .batch_export_dialog import BatchExportDialog
@@ -50,6 +51,12 @@ class MainWindow(QMainWindow):
         self.resize(1440, 920)
 
         self.folder = None
+
+        # 导出后台线程（同一时间只允许一个拼接 / 导出任务）
+        self._export_thread = None
+        self._export_verb = ""
+        self._export_total = 0
+        self._stitch_columns = 1
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -175,6 +182,12 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("请选择一个图片文件夹")
 
+        # 右下角导出进度：当前 / 总数
+        self.progress_label = QLabel("")
+        self.progress_label.setObjectName("Hint")
+        self.progress_label.setMinimumWidth(180)
+        self.statusBar().addPermanentWidget(self.progress_label)
+
     # --------------------------------------------------------
     # 文件加载
     # --------------------------------------------------------
@@ -294,7 +307,13 @@ class MainWindow(QMainWindow):
         把选中的图片按当前缩放档位的列数拼接成一张总宽 3840 的大图：
         每格为一张缩略图并带文件名，高度随行数自然增长。
         放大显示时列数为 1，即每行只有一张。
+
+        渲染与保存放到后台线程执行，界面保持可交互。
         """
+
+        if self._export_thread is not None:
+            QMessageBox.information(self, "提示", "已有导出任务正在进行，请稍候。")
+            return
 
         indices = self._require_selection()
 
@@ -303,18 +322,9 @@ class MainWindow(QMainWindow):
 
         # 当前档位的一行列数（放大显示时为 1）
         columns = self.view.columns()
+        width, height = stitch_service.stitch_size(len(indices), columns)
 
-        def get_image(index):
-            image = self.view.hq_images.get(index)
-            if image is None:
-                image = self.view.images.get(index)
-            return image
-
-        canvas, width, height, failed = stitch_service.render_stitch(
-            self.view.paths, indices, columns, get_image
-        )
-
-        if canvas is None:
+        if width * height > stitch_service.STITCH_MAX_PIXELS:
             QMessageBox.warning(
                 self,
                 "提示",
@@ -343,18 +353,86 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        if not canvas.save(path):
-            QMessageBox.warning(self, "提示", "保存图片失败。")
-            return
+        # 快照当前路径与已加载图片，导出期间界面变化不影响本次任务
+        paths = list(self.view.paths)
+        cached = {}
 
-        message = f"已导出 {len(indices)} 张缩略图（{columns} 列）到：\n{path}"
+        for index in indices:
+            image = self.view.hq_images.get(index)
+            if image is None:
+                image = self.view.images.get(index)
+            if image is not None:
+                cached[index] = image
+
+        self._stitch_columns = columns
+
+        worker = StitchExportThread(
+            paths, indices, columns, cached, path, self
+        )
+        worker.done.connect(self._on_stitch_finished)
+
+        self._start_export_thread(worker, "拼接", len(indices))
+
+    # --------------------------------------------------------
+    # 导出线程的状态与回调
+    # --------------------------------------------------------
+
+    def _start_export_thread(self, thread, verb, total):
+        """启动导出线程，并在右下角显示进度。"""
+
+        self._export_thread = thread
+        self._export_verb = verb
+        self._export_total = total
+
+        thread.progress.connect(self._update_export_progress)
+        thread.failed.connect(self._on_export_failed)
+        thread.finished.connect(self._on_export_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+
+        self.progress_label.setText(f"{verb}中：0 / {total}")
+        thread.start()
+
+    def _update_export_progress(self, current, total):
+        self.progress_label.setText(
+            f"{self._export_verb}中：{current} / {total}"
+        )
+
+    def _on_stitch_finished(self, count, failed, path):
+
+        message = f"已导出 {count} 张缩略图（{self._stitch_columns} 列）到：\n{path}"
         if failed:
             message += f"\n\n其中 {failed} 张读取失败。"
 
+        self.progress_label.setText(f"拼接完成：{count} / {count}")
         QMessageBox.information(self, "拼接完成", message)
         self.statusBar().showMessage(
-            f"拼接完成：{len(indices)} 张 -> {Path(path).name}"
+            f"拼接完成：{count} 张 -> {Path(path).name}"
         )
+        QTimer.singleShot(8000, self._clear_progress_if_idle)
+
+    def _on_batch_finished(self, count, failed, target):
+
+        self.progress_label.setText(
+            f"导出完成：{count} / {self._export_total}"
+        )
+        self._report_export(count, failed, Path(target))
+        QTimer.singleShot(8000, self._clear_progress_if_idle)
+
+    def _on_export_failed(self, message):
+
+        self.progress_label.setText(f"{self._export_verb}失败")
+        QMessageBox.warning(
+            self, "提示", f"{self._export_verb}失败：\n{message}"
+        )
+        self.statusBar().showMessage(f"{self._export_verb}失败")
+        QTimer.singleShot(8000, self._clear_progress_if_idle)
+
+    def _on_export_thread_finished(self):
+        self._export_thread = None
+
+    def _clear_progress_if_idle(self):
+        if self._export_thread is None:
+            self.progress_label.clear()
 
     # --------------------------------------------------------
     # 图片调整导出
@@ -367,6 +445,10 @@ class MainWindow(QMainWindow):
         仅选中 1 张：弹出可视化编辑弹窗（可缩放 / 旋转 / 移动 / 切片）；
         选中多张：弹出批量导出弹窗（按长边像素等比缩放）。
         """
+
+        if self._export_thread is not None:
+            QMessageBox.information(self, "提示", "已有导出任务正在进行，请稍候。")
+            return
 
         if self.folder is None:
             QMessageBox.warning(self, "提示", "请先打开图片文件夹。")
@@ -425,25 +507,19 @@ class MainWindow(QMainWindow):
         self._report_export(count, failed, target_dir)
 
     def _export_batch(self, indices):
-        """多张图片：按长边像素等比缩放导出。"""
+        """多张图片：在后台线程按长边像素等比缩放导出。"""
 
         dialog = BatchExportDialog(len(indices), self.folder, self)
 
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.options is None:
             return
 
-        options = dialog.options
+        worker = BatchExportThread(
+            list(self.view.paths), indices, dialog.options, self
+        )
+        worker.done.connect(self._on_batch_finished)
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-
-        try:
-            count, failed, target_dir = export_service.export_batch(
-                self.view.paths, indices, options
-            )
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        self._report_export(count, failed, target_dir)
+        self._start_export_thread(worker, "导出", len(indices))
 
     # --------------------------------------------------------
     # 文件搬运
@@ -626,5 +702,12 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------
 
     def closeEvent(self, event):
+
+        # 等待正在执行的拼接 / 导出线程在当前图片处理完后结束
+        if self._export_thread is not None:
+            self._export_thread.cancel()
+            self._export_thread.wait()
+            self._export_thread = None
+
         self.loaders.stop()
         event.accept()

@@ -87,9 +87,12 @@ def export_single_slices(export, options, source_stem):
     return count, failed, target_dir
 
 
-def export_batch(paths, indices, options):
+def export_batch(paths, indices, options, on_progress=None, should_stop=None):
     """
     多图导出：按长边像素等比缩放导出。
+
+    on_progress(current, total) 每处理完一张回调一次；
+    should_stop() 返回 True 时提前结束（用于窗口关闭）。
 
     返回 (count, failed, target_dir)。
     """
@@ -99,11 +102,15 @@ def export_batch(paths, indices, options):
 
     count = 0
     failed = []
+    total = len(indices)
 
     for position, index in enumerate(indices, 1):
 
+        if should_stop is not None and should_stop():
+            break
+
         path = paths[index]
-        print(f"[导出] {position}/{len(indices)}  {Path(path).name}", flush=True)
+        print(f"[导出] {position}/{total}  {Path(path).name}", flush=True)
 
         try:
             output, size, quality = convert_batch_image(
@@ -124,5 +131,8 @@ def export_batch(paths, indices, options):
         except Exception as e:
             failed.append((Path(path).name, str(e)))
             print(f"[导出失败] {Path(path).name}: {e}", flush=True)
+
+        if on_progress is not None:
+            on_progress(position, total)
 
     return count, failed, target_dir
