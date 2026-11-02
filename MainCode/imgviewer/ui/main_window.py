@@ -8,12 +8,14 @@
 """
 
 import gc
+import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -540,10 +542,40 @@ class MainWindow(QMainWindow):
 
         return indices
 
-    def _after_transfer(self, title, message, status, success, reload=False):
+    def _after_transfer(self, title, message, status, success, reload=False,
+                        open_folder=None):
 
-        QMessageBox.information(self, title, message)
+        open_requested = False
+
+        if open_folder is None:
+
+            QMessageBox.information(self, title, message)
+
+        else:
+
+            # 复制 / 移动成功后，额外提供「打开该文件夹」选项
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(message)
+
+            open_button = box.addButton(
+                "打开该文件夹", QMessageBox.ButtonRole.ActionRole
+            )
+            ok_button = box.addButton(
+                "确定", QMessageBox.ButtonRole.AcceptRole
+            )
+            set_button_role(open_button, "primary")
+            box.setDefaultButton(ok_button)
+            box.exec()
+
+            open_requested = box.clickedButton() is open_button
+
         self.statusBar().showMessage(status)
+
+        # 在新的 Explorer 窗口中打开目标文件夹
+        if open_requested:
+            self._open_folder(open_folder)
 
         # 成功后取消所有勾选并清空输入框
         if success:
@@ -555,6 +587,23 @@ class MainWindow(QMainWindow):
         # 移动成功后刷新列表（源文件已不在原文件夹）
         if reload and self.folder is not None:
             self.load_folder(self.folder)
+
+    def _open_folder(self, folder):
+        """在系统文件管理器中打开指定文件夹（Windows 使用新的 Explorer 窗口）。"""
+
+        path = Path(folder)
+
+        if not path.is_dir():
+            QMessageBox.warning(self, "提示", "文件夹不存在，无法打开。")
+            return
+
+        try:
+            if os.name == "nt":
+                subprocess.Popen(["explorer", str(path)])
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception as e:
+            QMessageBox.warning(self, "提示", f"打开文件夹失败：\n{e}")
 
     def _collect(self, move):
         """收集待处理文件，返回 (indices, sources, verb)，无有效选择时返回 None。"""
@@ -594,6 +643,7 @@ class MainWindow(QMainWindow):
             f"{verb}完成：{count} 个文件 -> {target.name}",
             count > 0,
             reload=move,
+            open_folder=target if count > 0 else None,
         )
 
     def _transfer_to_folder(self, move):
@@ -634,6 +684,7 @@ class MainWindow(QMainWindow):
                 f"{verb}完成：{outcome.count} 个文件 -> {Path(target).name}",
                 True,
                 reload=move,
+                open_folder=target if outcome.count > 0 else None,
             )
             return
 
@@ -643,6 +694,7 @@ class MainWindow(QMainWindow):
             f"{verb}完成 -> {target}",
             True,
             reload=move,
+            open_folder=target,
         )
 
     def move_to_recycle_bin(self):
